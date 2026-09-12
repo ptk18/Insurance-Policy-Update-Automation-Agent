@@ -1,0 +1,33 @@
+name: Backend checks
+
+on: [push, pull_request]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: policy_test
+          POSTGRES_USER: policy_test
+          POSTGRES_PASSWORD: local-test-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U policy_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+      - run: uv run pytest
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://policy_test:local-test-only@localhost:5432/policy_test
