@@ -44,8 +44,38 @@ or uncertain. Any other document text is ignored. Image documents are stored but
 reported uncertain: there is no OCR, and image/model inspection is deferred. Seven
 synthetic sample documents are downloadable from `GET /fixtures`.
 
-**The LangGraph tool loop, checkpoints/jobs, image inspection, Next.js dashboard,
-and deployment are still pending.** Request text is untrusted input: the model
+The eight agent tools from the plan exist as typed, case-scoped functions
+(`src/policy_update/tools.py`): each validates a strict input, runs the same service
+code as the review API, returns a structured result or error the model can observe,
+counts against a bounded call budget, and is audited as `tool_called`. Approval,
+rejection, and proposal edits are reviewer-only API operations and are not tools;
+nothing in the tool layer takes a bearer token.
+
+When a model key is configured, `POST /cases/{id}/process` runs the bounded
+LangGraph loop (`src/policy_update/agent.py`) instead of the rule-based stand-in:
+the model receives the goal, the eight tool declarations, and a case snapshot in
+which the request text is marked as data, then chooses one tool per turn and reads
+its result. Each tool call commits in its own transaction; the loop's own state is
+checkpointed in the same database. A call that leaves the case awaiting
+information or approval interrupts the loop; a reviewer reply or approval followed
+by `POST /cases/{id}/resume` continues it (after approval the agent applies the
+exact approved version; `/execute` remains available as the manual path). The loop
+stops for human review with an `agent_stopped` finding when the model finishes
+without a proposal or reaches the tool-call budget (`AGENT_TOOL_BUDGET`, default
+12). Every attempt is recorded on a durable job (`job` in the case view:
+action, `running|waiting|completed|failed`, attempts, `retryable`, sanitized
+`last_error`) with `processing_failed`/`processing_finished` timeline events. A
+model failure mid-loop answers 503 (retryable) or 502 and leaves the case
+`processing` with its checkpoint; `POST /cases/{id}/process` or `/retry` continues
+from the last completed step, and `/retry` is the only way past a job still marked
+`running` after a dead process. The timeline shows
+`agent_decision` (tool plus the model's one-sentence stated intent), `tool_called`,
+and `agent_finished` events — never hidden reasoning. Set `AGENT_LOOP=off` to keep
+rule-based processing with extraction only.
+
+**A separate worker process, image inspection, the Next.js dashboard, and
+deployment are still pending.** The loop runs inside the API request with an
+in-process per-case lock plus the job's `running` marker, so it is single-instance. Request text is untrusted input: the model
 only extracts from it, and every extracted value is checked against the text.
 Callers may supply the policy number and structured changes explicitly; the
 extraction path fills them from the text when they are omitted. Address evidence
@@ -69,7 +99,10 @@ sent only in the `x-goog-api-key` header. Without `GEMINI_API_KEY`, `GET /health
 reports `"extraction": "unconfigured"` and free-text intake pauses for a reviewer.
 `GEMINI_MODEL` overrides the default `gemini-3.8-flash`. Free-tier requests are
 rate limited and may answer 429/503; the adapter retries once, then reports 503 so
-`POST /cases/{id}/process` can be repeated later.
+`POST /cases/{id}/process` can be repeated later. An agent run makes roughly five
+to seven model calls per case, so a full demo can exhaust the free per-minute quota
+of the larger Flash models; `GEMINI_MODEL=gemini-3.5-flash-lite` has more headroom
+and completed the demo scenarios.
 
 Open <http://127.0.0.1:8000/docs> for the interactive review API. SQLite persists to
 `policy_demo.db` by default. Startup creates missing tables (including the new
@@ -90,7 +123,9 @@ uv run python scripts/demo.py
 The script creates a new isolated guest, submits and processes each intake,
 performs simulated reviewer approvals, executes each update, and checks duplicate
 execution. It keeps the guest token in memory and never prints it. This is an API
-smoke demo, not an agent run; the free-text scenarios make live model calls.
+smoke demo; with a configured key every `/process` is a live agent run and the
+script prints the tool sequence the model chose, retries on 502/503, and resumes
+the loop after each approval.
 
 For manual review through `/docs`:
 
@@ -103,13 +138,16 @@ For manual review through `/docs`:
    upload it with `POST /cases/{id}/attachments`. An upload to a `received` case
    becomes its evidence; the response shows the inspection result and page.
 4. Call `POST /cases/{id}/process`, then inspect the returned case's before/after
-   values, findings, and evidence source. Processing a case twice returns 409.
+   values, findings, evidence source, and (in agent mode) the `agent_decision` and
+   `tool_called` timeline entries. Processing a completed case returns 409; a case
+   left `processing` by a model failure continues where it stopped.
 5. For missing/conflicting evidence, call `POST /cases/{id}/replies` with
    `{"expected_version": 1, "text": "Corrected evidence", "evidence_id": ...}` where
    `evidence_id` is a fixture name such as `matching-address` or the ID of an
    attachment uploaded to this case.
-6. Approve the case's `current_version` with `POST /cases/{id}/approve`, then call
-   `POST /cases/{id}/execute` with that same `{"version": ...}` body.
+6. Approve the case's `current_version` with `POST /cases/{id}/approve`, then either
+   call `POST /cases/{id}/resume` (agent mode: the agent applies the approved
+   version) or `POST /cases/{id}/execute` with the same `{"version": ...}` body.
 7. Inspect `GET /cases/{id}` for the confirmation draft and timeline. Execute the
    same version again to retrieve the original receipt.
 
@@ -128,6 +166,13 @@ uv run ruff check .
 uv run ruff format --check .
 uv run pytest -q
 ```
+
+`scripts/evaluate_model.py` runs seven synthetic and adversarial request texts
+through a running server with a configured key and checks backend invariants
+(no inferred policy number, unsupported changes pause, injected text cannot skip
+evidence or approval). It is a labeled synthetic measurement on a few examples,
+not an accuracy or security claim; its last run matched 7/7 on
+`gemini-3.5-flash-lite`.
 
 The test suite never loads `.env` or calls a hosted model: `conftest.py` builds
 the app with `model=None`, and extraction tests use a scripted `FakeModel` or an
@@ -166,21 +211,23 @@ SQLite storage. CI runs the suite on SQLite and PostgreSQL 17.
   (type, size, readability), not extracted document values. Application code does
   not log request bodies, bearer tokens, model keys, or document contents. Model
   error responses carry the HTTP status only. No email is sent.
-- The model receives the request text as data with a fixed output schema and no
-  tools. Extracted values must appear verbatim in the text; a stated policy number
-  still passes the broker assignment check, so text cannot escalate access.
+- The model receives the request text as data. Extracted values must appear
+  verbatim in the text; a stated policy number still passes the broker assignment
+  check, so text cannot escalate access. In the loop the model can only call the
+  eight typed tools, one per turn, within a budget; every call is validated,
+  authorized, and audited by the backend, and approval is not a tool.
 
 The future agent's allowlist must expose only the permitted processing tools from
 the plan. It must not expose reviewer approval operations or receive a guest's
-reviewer bearer token. Grounding limits what an injected instruction can change to
-values already present in the text; no broader prompt-injection resistance claims
-are made for the unfinished tool loop.
+reviewer bearer token. Grounding and the tool contracts limit what an injected
+instruction can change to values already present in the text and to actions the
+backend validates anyway; no adversarial evaluation of the hosted model has been
+run yet, so no broader prompt-injection resistance claim is made.
 
 ## Next implementation steps
 
-1. Add the LangGraph tool-selection loop over typed tools, image document
-   inspection through the model adapter, durable checkpoints, processing jobs,
-   bounded tool calls, and manual retry handling.
+1. Move the loop into a worker process with stale-job detection, and add image
+   document inspection through the model adapter.
 2. Build the Next.js review dashboard around these endpoints.
 3. Add database migrations, guest lifecycle limits, containers, and deployment;
    run the complete acceptance scenarios in the hosted environment.

@@ -48,6 +48,7 @@ def test_free_text_intake_is_extracted_grounded_and_processed(client, guest, fak
     )
     case = submit(client, guest, free_text())
     assert fake.calls == [FREE_TEXT]
+    assert fake.contexts == [None]
     assert case["status"] == "awaiting_approval"
     assert case["policy_number"] == "DEMO-1001"
     assert case["requested_changes"] == {
@@ -194,6 +195,17 @@ def test_model_failure_keeps_intake_retryable(client, guest, fake):
     assert len(fake.calls) == 3
 
 
+def test_known_policy_number_is_passed_as_context_not_reextracted(client, guest, fake):
+    fake.responses.append(answer(policy_number="DEMO-2002", email="sam.taylor@example.net"))
+    case = submit(client, guest, free_text(policy_number="DEMO-1001"))
+    assert fake.contexts == [
+        "The policy number is already known to be DEMO-1001; do not report it as missing."
+    ]
+    # A structurally supplied number is never overridden by the model's answer.
+    assert case["policy_number"] == "DEMO-1001"
+    assert case["status"] == "awaiting_approval"
+
+
 def test_unconfigured_model_falls_back_to_structured_intake(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with TestClient(create_app(f"sqlite:///{tmp_path / 'plain.db'}", model=None)) as client:
@@ -244,7 +256,13 @@ def test_gemini_client_sends_schema_and_keeps_the_key_out_of_the_url():
         "ambiguities",
     ]
     assert "Policy DEMO-1001 text" in body["contents"][0]["parts"][0]["text"]
+    assert "Known context" not in body["contents"][0]["parts"][0]["text"]
     assert "systemInstruction" in body
+    client.extract("more text", "The policy number is already known to be DEMO-1001.")
+    assert (
+        "Known context supplied separately by the caller: The policy number"
+        in json.loads(seen[1].content)["contents"][0]["parts"][0]["text"]
+    )
 
 
 @pytest.mark.parametrize(

@@ -160,7 +160,7 @@ def test_embedded_document_instructions_only_yield_labeled_fields(client, guest,
 
 def test_upload_validation_rejects_wrong_type_size_and_state(tmp_path, address, contact):
     with TestClient(
-        create_app(f"sqlite:///{tmp_path / 'limit.db'}", max_attachment_bytes=1500)
+        create_app(f"sqlite:///{tmp_path / 'limit.db'}", max_attachment_bytes=1500, model=None)
     ) as c:
         guest = {"Authorization": f"Bearer {c.post('/workspaces').json()['token']}"}
         case = intake(c, guest, address)
@@ -213,12 +213,12 @@ def test_attachments_are_isolated_by_workspace_and_case(client, guest, address):
 
 def test_attachment_and_binding_survive_restart(tmp_path, address):
     url = f"sqlite:///{tmp_path / 'restart.db'}"
-    with TestClient(create_app(url)) as first:
+    with TestClient(create_app(url, model=None)) as first:
         guest = {"Authorization": f"Bearer {first.post('/workspaces').json()['token']}"}
         case = intake(first, guest, address)
         pdf = sample(first, guest, "matching-pdf")
         attachment = upload(first, guest, case["id"], pdf).json()
-    with TestClient(create_app(url)) as second:
+    with TestClient(create_app(url, model=None)) as second:
         detail = second.get(f"/cases/{case['id']}", headers=guest).json()
         assert detail["evidence_id"] == attachment["id"]
         content = second.get(

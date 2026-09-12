@@ -106,9 +106,11 @@ attachments inspected by [documents.py](../src/policy_update/documents.py).
 
 ## 3. Bounded agent and durable processing
 
-B13 and E02–E05 are in place, so both the contact-only and PDF address paths
-attach to `process_case`; A01 adds model extraction for free-text intake. No
-LangGraph dependency or agent worker exists in the current tree.
+The bounded loop in [agent.py](../src/policy_update/agent.py) runs when a model
+is configured (`GEMINI_API_KEY`; `AGENT_LOOP=off` keeps rule-based processing).
+`POST /cases/{id}/process` moves the case to `processing`, extracts free text if
+needed, and runs the LangGraph loop inside the API process; `POST /cases/{id}/resume`
+continues it after a human reply or approval. There is no separate worker process.
 
 - [x] A01 — Provider: Gemini (`gemini-3.8-flash` by default, `GEMINI_MODEL`
   override) through `generateContent` REST with a JSON response schema;
@@ -121,27 +123,70 @@ LangGraph dependency or agent worker exists in the current tree.
   and leave the case `received`. Text only: image document inspection through the
   model is deferred (E04 stays partial). Verified live on synthetic text
   (2026-09-12); the test suite uses scripted fakes and a mocked transport.
-- [ ] A02 — Expose typed, case/workspace-scoped tools for all eight responsibilities
-  in the plan. **Partial:** domain validation, authorization, proposals, execution,
-  and drafts exist; model-facing tool contracts and registration do not.
-- [ ] A03 — Implement genuine LLM tool selection and observation through LangGraph.
-  Enforce a bounded tool-call budget and stop for review on ambiguity/exhaustion.
-- [ ] A04 — Interrupt for information and human approval, resume eligible cases,
-  and exclude approval operations/reviewer credentials from model access.
-- [ ] A05 — Persist LangGraph checkpoints and processing jobs independently of the
-  browser request, including recovery after a worker restart.
-- [ ] A06 — Persist temporary failures and expose manual processing/execution retry.
-  **Partial:** execution retries already preserve approval and idempotency, a
-  failed or model-unavailable `/process` request leaves the intake `received` so it
-  can be resubmitted, and the Gemini client retries once (honouring `Retry-After`);
-  there is no worker retry API or durable failed/retryable job state, and a failed
-  extraction attempt is not recorded.
-- [ ] A07 — Record tool calls, outcomes, and concise decision summaries. **Partial:**
-  domain audit events and the `request_extracted` event (grounded fields, dropped
-  values, token usage) exist; model tool execution history does not.
-- [ ] A08 — Test tool boundaries, malicious email/document instructions, model
-  errors, interruption/resumption, and budget exhaustion with deterministic fakes;
-  separately evaluate authorized hosted-model runs on synthetic examples.
+- [x] A02 — [tools.py](../src/policy_update/tools.py) registers exactly the eight
+  plan responsibilities (`get_policy`, `check_broker_assignment`,
+  `inspect_document`, `validate_proposed_changes`, `draft_follow_up`,
+  `submit_for_approval`, `apply_approved_update`, `draft_confirmation`) with strict
+  Pydantic inputs, JSON schemas for the model, and structured error results. Tools
+  run against one already-authorized case in the caller's transaction and delegate
+  to the service layer, so authorization, permitted fields, evidence, versioning,
+  and idempotent execution are unchanged; `get_policy` binds a missing number only
+  when it is stated verbatim in the request. Approve/reject/edit and the reviewer
+  token are not reachable. `run_tool` enforces a call budget (`BudgetExhausted`) and
+  audits every call as `tool_called` (tool, argument names, outcome). No loop calls
+  them yet (A03).
+- [x] A03 — LangGraph `StateGraph` (`decide → act → wait | finish`): each turn the
+  model receives the goal, the eight tool declarations, the prior tool results, and
+  a case snapshot with request text marked as data, and answers with one Gemini
+  function call or a final sentence. `act` runs the tool in its own transaction.
+  The per-segment budget (`AGENT_TOOL_BUDGET`, default 12) and a model that stops
+  without leaving a proposal both pause the case for review with an
+  `agent_stopped` finding. Verified live: contact-only, fixture-evidence, uploaded
+  PDF, and free-text cases resolved through model-chosen tool sequences
+  (2026-09-12, `gemini-3.5-flash-lite` after `gemini-3.8-flash` hit free-tier
+  quota); the suite uses a scripted `FakeChat`.
+- [x] A04 — A tool call that moves the case into `awaiting_information` or
+  `awaiting_approval` raises a LangGraph `interrupt`; `/resume` continues only an
+  `awaiting_information` case (after a reply) or an `approved` case, refusing an
+  unapproved one. Approve/reject/edit remain reviewer API actions; the loop never
+  sees a bearer token and observes approval only through case state.
+- [ ] A05 — **Partial:** checkpoints persist in LangGraph's tables in the same
+  SQLite file or PostgreSQL database (`make_checkpointer`), keyed by case ID, so an
+  interrupted or failed loop survives an app restart and continues from its last
+  completed step (proved by tests and a live 503 retry); the `processing_jobs`
+  table records every attempt. The loop still runs inside the API request (with an
+  in-process per-case lock and the job's `running` marker); there is no queue or
+  separate worker, so a run whose process dies mid-step is recovered only by an
+  explicit `POST /cases/{id}/retry`.
+- [x] A06 — Every `/process`, `/resume`, and `/retry` attempt is wrapped in a
+  durable `ProcessingJob` row (action, `running|waiting|completed|failed`, attempts,
+  `retryable`, sanitized `last_error`), committed before and after the run so a
+  model failure (503 retryable / 502 not), a crash inside the request, or a dead
+  process leaves a visible record and a `processing_failed` audit event while the
+  case keeps its last committed state (`received`, or `processing` with its
+  checkpoint). `POST /cases/{id}/retry` runs whichever attempt applies and is the
+  only way past a stalled `running` job; `/process` and `/resume` refuse
+  mismatched states with a hint. Execution retry remains the idempotent `/execute`.
+  The case view carries `job`, the list `job_status`. The Gemini client retries
+  once honouring `Retry-After` and reports Google's status word.
+- [x] A07 — The timeline records `processing_started`, `request_extracted`,
+  per-turn `agent_decision` (chosen tool and the model's one-sentence stated
+  intent, capped at 300 characters), per-call `tool_called` (tool, argument names,
+  outcome), and `agent_finished`. Hidden reasoning, raw request text, and document
+  contents are never recorded.
+- [x] A08 — Deterministic fakes cover tool boundaries and budget
+  ([test_tools.py](../tests/test_tools.py)), model errors, interruption/resumption,
+  crash continuation, and restart ([test_agent.py](../tests/test_agent.py)), and a
+  model steered by injected request/document text
+  ([test_adversarial.py](../tests/test_adversarial.py): skipping evidence, forged
+  versions, cross-policy and cross-workspace access, leaked attachment IDs,
+  unsupported fields, instruction-bearing PDFs). The separate live evaluation
+  [scripts/evaluate_model.py](../scripts/evaluate_model.py) runs seven synthetic
+  and adversarial texts through the API and checks backend invariants; it is a
+  labeled synthetic measurement, not an accuracy or security claim. Run 2026-09-12
+  on `gemini-3.5-flash-lite`: 7/7 after two fixes it surfaced (extraction notes now
+  pause the first agent proposal; a structurally supplied policy number is passed
+  as context and never re-extracted).
 
 ## 4. Review dashboard
 
@@ -169,18 +214,20 @@ Evidence: [tests](../tests/test_workflow.py),
 [CI configuration](../.github/workflows/ci.yml), and
 [demo script](../scripts/demo.py).
 
-- [x] V01 — Add backend regression tests: 40 test functions / 59 parameterized
-  cases across three modules. See the testing guide for assertions and gaps.
+- [x] V01 — Add backend regression tests: 64 test functions / 83 parameterized
+  cases across six modules. See the testing guide for assertions and gaps.
 - [x] V02 — Verify the backend suite locally on SQLite and PostgreSQL; verify lint
-  and formatting. A01 session (2026-09-12): 59 passed on SQLite and on a dedicated
+  and formatting. A06/A08 session (2026-09-12): 83 passed on SQLite and on a dedicated
   local PostgreSQL test database; `ruff check`/`ruff format --check` clean.
 - [x] V03 — Configure CI to run lint/format and tests on SQLite/PostgreSQL 17.
   Hosted CI execution is not yet verified.
 - [x] V04 — Run a local API smoke script for contact-only, missing evidence/resume,
   conflict/correction, uploaded-PDF conflict/correction, and (with a configured
   key) live free-text extraction and unsupported-change pause scenarios, with
-  duplicate execution checks on the fixture scenarios (rerun 2026-09-12 against
-  Gemini).
+  duplicate execution checks on the fixture scenarios. In agent mode the script
+  prints the model-chosen tool sequence, retries `/process` on 502/503, and calls
+  `/resume` after approval (rerun 2026-09-12: five of six scenarios completed on
+  `gemini-3.5-flash-lite`; the sixth hit the free-tier per-minute quota).
 - [ ] V05 — Add versioned migrations and verify upgrades with retained demo data.
 - [ ] V06 — Add guest expiry/cleanup, resource limits, private storage configuration,
   and safe operational logging appropriate to the public demo.
@@ -198,34 +245,38 @@ Numbers refer to the twelve criteria in [plan.md](plan.md). These are readiness
 notes, not an assertion that the full deployed product passes acceptance.
 
 1. **Partial:** isolated guests and samples via API (B02/E01); guest UI absent (U02).
-2. **Partial:** fixture- and PDF-backed proposals work and free-text requests are
-   extracted with grounding (B06/B08/E04/A01); model tool selection and image
-   inspection are absent (A02–A04).
-3. **Backend covered:** contact-only proceeds without attachment (B04/B09/V01);
-   demonstrate it through the agent and UI (A03/U02–U04).
-4. **Backend covered:** missing number/evidence, scanned, and unlabeled PDFs pause
-   and draft clarification (B05/B06/E04); agent-driven follow-up remains (A02).
+2. **Partial:** fixture- and PDF-backed proposals, grounded free-text extraction,
+   and model-selected tool sequences work (B06/B08/E04/A01–A04); image inspection
+   through the model is absent.
+3. **Agent covered:** contact-only proceeds without attachment through the loop
+   (B04/B09/A03/V01/V04); the UI demonstration remains (U02–U04).
+4. **Agent covered:** missing number/evidence, scanned, and unlabeled PDFs pause
+   and draft clarification, and the loop's `draft_follow_up` pauses via interrupt
+   (B05/B06/E04/A04).
 5. **Backend covered:** conflicting fixtures and PDFs block; a corrected reply or
    corrected upload bound by a reply creates a valid new version (B07/B08/E05);
    the dashboard flow remains (U05).
-6. **API covered:** unassigned/revoked access and cross-workspace attachment access
-   are denied (B05/E03/V01); prove future agent tools preserve the boundary (A02/A08).
+6. **API and agent covered:** unassigned/revoked access and cross-workspace
+   attachment access are denied (B05/E03/V01); the typed tools reuse those checks,
+   cannot reach approval, and the loop refuses other guests (A02–A04); adversarial
+   model evaluation remains (A08).
 7. **Partial:** before/after data and exact-version approval exist (B08/B09);
    reviewer dashboard absent (U03/U04).
 8. **Partial:** execution, saved values/audit, and confirmation template exist
    (B10/B11); model execution and dashboard presentation absent (A02/U06).
-9. **API covered:** unapproved/stale execution is rejected (B09/B10/V01);
-   verify through agent and UI integrations (A08/U04).
-10. **Partial:** app recreation over SQLite retains received/awaiting-approval/
-    approved cases and receipts, and duplicate execution is covered. Awaiting-
-    information restart, LangGraph checkpoints, and worker/host restart recovery
-    remain (A05/V08).
+9. **API and agent covered:** unapproved/stale execution is rejected and the loop's
+   `apply_approved_update` fails before approval (B09/B10/A04/V01); UI remains (U04).
+10. **Partial:** app recreation retains cases, receipts, job records, and the
+    interrupted LangGraph thread, which resumes after restart; a failed step
+    continues from its checkpoint via `/retry`. A separate worker and host restart
+    recovery remain (A05/V08).
 11. **Cases/policies/attachments covered:** API tenant isolation exists
     (B02/E03/V01); browser session separation remains (U02).
-12. **Partial:** raw request text, forged approval input, and instruction text
-    inside an uploaded PDF cannot bypass the current API (E06); extracted values
-    are limited to text that is actually present and still pass authorization
-    (A01). No adversarial evaluation of the hosted model itself exists (A08).
+12. **Covered for the backend:** raw request text, forged approval input,
+    instruction text inside an uploaded PDF, and a model steered by any of them
+    cannot bypass evidence, approval, authorization, or isolation (E06/A01/A08);
+    the live synthetic evaluation passed 7/7 on one model. No claim is made about
+    other models or a broader attack corpus.
 
 ## Later phases
 
@@ -236,7 +287,6 @@ notes, not an assertion that the full deployed product passes acceptance.
   matching, access configuration, and outbound-message policy with separate tests.
   Real sending is outside the initial demo.
 
-Next work: A02–A05 (typed tools, LangGraph loop, interrupts, durable jobs) and
-the deferred image inspection through the adapter (E04), which attach to
-`process_case` and the stored attachments without changing intake. UI work can proceed against existing
-endpoints once U01 establishes its baseline.
+Next work: the worker half of A05 (queue/worker owning the loop, stale-job
+detection), the deferred image inspection through the adapter (E04), and then the
+review dashboard (U01–U07) against the existing endpoints.

@@ -65,7 +65,17 @@ def test_intake_is_persisted_before_processing(client, guest, contact):
     assert [event["action"] for event in processed.json()["timeline"]] == [
         "case_created",
         "proposal_validated",
+        "processing_finished",
     ]
+    assert processed.json()["job"] == {
+        **{key: processed.json()["job"][key] for key in ("started_at", "updated_at")},
+        "action": "process",
+        "status": "waiting",
+        "attempts": 1,
+        "retryable": False,
+        "last_error": None,
+    }
+    assert client.get("/cases", headers=guest).json()[0]["job_status"] == "waiting"
     assert client.post(f"/cases/{received['id']}/process", headers=guest).status_code == 409
     assert client.get(f"/cases/{received['id']}", headers=guest).json()["current_version"] == 1
 
@@ -86,10 +96,18 @@ def test_processing_failure_keeps_intake_retryable(app, guest, contact, monkeypa
         assert detail["status"] == "received"
         assert detail["proposals"] == []
         assert detail["requested_changes"] == contact["changes"]
+        # The crash is recorded on the durable job without touching the intake.
+        assert detail["job"]["status"] == "failed"
+        assert detail["job"]["retryable"] is True
+        assert detail["job"]["last_error"] == "Unexpected processing error"
+        [failed] = [e for e in detail["timeline"] if e["action"] == "processing_failed"]
+        assert failed["details"]["attempt"] == 1
         retried = client.post(f"/cases/{received['id']}/process", headers=guest)
         assert retried.status_code == 200
         assert retried.json()["status"] == "awaiting_approval"
         assert retried.json()["current_version"] == 1
+        assert retried.json()["job"]["attempts"] == 2
+        assert retried.json()["job"]["status"] == "waiting"
 
 
 def test_intake_without_changes_pauses_until_reviewer_supplies_them(client, guest, contact):
@@ -350,20 +368,20 @@ def test_authentication_required(client):
 
 def test_paused_case_approval_and_receipt_survive_restart(tmp_path, contact):
     url = f"sqlite:///{tmp_path / 'restart.db'}"
-    with TestClient(create_app(url)) as first:
+    with TestClient(create_app(url, model=None)) as first:
         token = first.post("/workspaces").json()["token"]
         guest = {"Authorization": f"Bearer {token}"}
         case = first.post("/cases", headers=guest, json=contact).json()
         assert case["status"] == "received"
-    with TestClient(create_app(url)) as second:
+    with TestClient(create_app(url, model=None)) as second:
         assert second.get(f"/cases/{case['id']}", headers=guest).json()["status"] == "received"
         processed = second.post(f"/cases/{case['id']}/process", headers=guest)
         assert processed.json()["status"] == "awaiting_approval"
         assert action(second, guest, case, "approve").status_code == 200
-    with TestClient(create_app(url)) as third:
+    with TestClient(create_app(url, model=None)) as third:
         result = action(third, guest, case, "execute")
         assert result.status_code == 200
-    with TestClient(create_app(url)) as fourth:
+    with TestClient(create_app(url, model=None)) as fourth:
         assert action(fourth, guest, case, "execute").json() == result.json()
         assert policy(fourth, guest)["revision"] == 2
 

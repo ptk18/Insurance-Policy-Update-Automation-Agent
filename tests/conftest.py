@@ -6,6 +6,15 @@ from fastapi.testclient import TestClient
 from policy_update.api import create_app
 
 
+@pytest.fixture(autouse=True)
+def no_live_model(tmp_path, monkeypatch):
+    # Belt and braces: even a create_app() call that forgets model=None must not
+    # find a key. The .env loader is pointed at a file that does not exist.
+    monkeypatch.setenv("POLICY_UPDATE_ENV_FILE", str(tmp_path / "absent.env"))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("AGENT_LOOP", raising=False)
+
+
 @pytest.fixture
 def app(tmp_path):
     # Every test gets fresh guests. No database cleanup or shared-data deletion is needed.

@@ -7,23 +7,29 @@ below refer to [plan.md](plan.md).
 ## What exists today
 
 [test_workflow.py](../tests/test_workflow.py) (22 functions / 29 cases),
-[test_attachments.py](../tests/test_attachments.py) (7 functions / 11 cases), and
-[test_extraction.py](../tests/test_extraction.py) (11 functions / 19 cases) total
-**40 test functions, producing 59 cases after parameterization**. They exercise the
+[test_attachments.py](../tests/test_attachments.py) (7 functions / 11 cases),
+[test_extraction.py](../tests/test_extraction.py) (12 functions / 20 cases),
+[test_tools.py](../tests/test_tools.py) (9 functions / 9 cases),
+[test_agent.py](../tests/test_agent.py) (10 functions / 10 cases), and
+[test_adversarial.py](../tests/test_adversarial.py) (4 functions / 4 cases) total
+**64 test functions, producing 83 cases after parameterization**. They exercise the
 FastAPI API with a real SQLAlchemy database through TestClient. Hosted-model
 behavior is covered only through scripted fakes and a mocked HTTP transport; there
 are no live-model, frontend, LangGraph, or image-inspection tests. This is a
 behavior inventory, not a measured line/branch coverage report.
 
-The A01 session (2026-09-12) ran all 59 cases on SQLite and on a dedicated local
-PostgreSQL test database, plus lint/format checks and the six live API smoke
-scenarios (two of them against Gemini). CI is configured, but a hosted run has not
+The A06/A08 session (2026-09-12) ran all 83 cases on SQLite and on a dedicated
+local PostgreSQL test database (which also exercises the PostgreSQL checkpointer),
+plus lint/format checks, the live demo in agent mode, and the live synthetic
+evaluation (7/7 on `gemini-3.5-flash-lite`). CI is configured, but a hosted run has not
 been verified.
 
 [helpers.py](../tests/helpers.py) provides `submit` (intake expecting `received`,
-then `POST /cases/{id}/process`), `action`, `policy`, and `FakeModel`/`answer` (a
-scripted model whose queued items are raw answers or exceptions; an unscripted
-call fails loudly). `conftest.py` builds the app with `model=None`, so the suite
+then `POST /cases/{id}/process`), `action`, `policy`, `upload_doc`, and
+`FakeModel`/`answer` (a scripted extraction model) and `FakeChat`/`call`/`stop` (a
+scripted tool-selection model that keeps every prompt it saw); unscripted calls
+fail loudly. An autouse fixture points `.env` loading at a missing file and clears
+`GEMINI_API_KEY`, so even a bare `create_app()` in a test cannot go live. `conftest.py` builds the app with `model=None`, so the suite
 never loads `.env` or calls a hosted model; extraction tests override `app` with a
 `FakeModel`. Use `submit` unless a test is about the intake/processing boundary.
 `test_attachments.py` adds local `sample`, `upload`, `reply_with`, and `intake`
@@ -191,7 +197,101 @@ model; live behavior is checked only by the demo script with a configured key.
   `model_from_env` and the app factory (`POLICY_UPDATE_ENV_FILE`) build the client
   without a network call.
 
+### Typed agent tools — criteria 2, 4, 5, 6, 7, 9, 12 (A02)
+
+All in [test_tools.py](../tests/test_tools.py). Tools run through `run_tool` in a
+service session (one transaction per call, like a worker step); reviewer approval
+goes through the API because the tools cannot perform it.
+
+- `test_registry_exposes_exactly_the_eight_permitted_tools` — schemas for exactly
+  the eight plan responsibilities, strict objects, no reviewer operations, tokens,
+  or workspace IDs in the contract.
+- `test_get_policy_enforces_access_and_never_infers_the_number` — assigned policy is
+  returned; an unassigned one fails without details; a number not stated in the
+  text is refused and stays unresolved; a stated number binds as written; a
+  mismatching number is refused.
+- `test_check_broker_assignment_reports_without_policy_details`.
+- `test_inspect_document_binds_only_evidence_of_this_case` — fixture and same-case
+  upload bind; another case's attachment and a malformed ID are refused without
+  changing the bound evidence.
+- `test_validate_is_a_dry_run` — findings returned, no proposal created, unsupported
+  fields rejected by the input contract.
+- `test_agent_path_submits_waits_for_human_approval_then_applies` — inspect →
+  submit (v1, awaiting approval) → apply refused (409) → human approves via API →
+  apply → idempotent repeat → confirmation draft; completed case refuses further
+  binding; `tool_called` events carry argument names only and `proposal_validated`
+  is sourced `agent_tool`.
+- `test_follow_up_pauses_the_case_and_a_reply_resumes_it` — clarification finding
+  and draft, approval refused, a reply creates version 2 without the note.
+- `test_unknown_tools_and_the_budget_stop_the_loop` — unknown tool and invalid
+  arguments are structured errors; the third call over a budget of two raises
+  `BudgetExhausted`; all attempts are audited.
+- `test_tools_reuse_the_api_helpers` — structured processing and tool submission
+  share the proposal shape.
+
+### Agent loop — criteria 2, 3, 4, 6, 9, 10, 12 (A03–A05, A07)
+
+All in [test_agent.py](../tests/test_agent.py), through the API with a `FakeChat`
+that scripts the model's tool choices.
+
+- `test_agent_selects_tools_waits_for_human_approval_and_applies` — four scripted
+  tool choices lead to `awaiting_approval`; the prompt is checked (goal, eight tool
+  declarations without `$ref`, request text marked as data, no policy values before
+  `get_policy`, tool results fed back); `/resume` before approval is refused; after
+  the reviewer approves, `/resume` lets the model apply version 1 and the case
+  completes with a confirmation draft; `agent_decision`, `tool_called`,
+  `processing_started`, and `agent_finished` events are recorded.
+- `test_agent_asks_for_information_and_continues_after_a_reply` — `draft_follow_up`
+  pauses the case (interrupt); a reply creates version 2; `/resume` shows the reply
+  and the latest proposal to the model, which submits version 3.
+- `test_model_that_stops_without_acting_pauses_for_a_human` — a final answer with no
+  proposal produces `agent_stopped` plus the domain findings and quotes the model's
+  sentence in the draft.
+- `test_tool_budget_stops_the_loop_for_review` — `AGENT_TOOL_BUDGET=2`: two calls run,
+  the third decision is never requested, the case pauses with the limit reason.
+- `test_forbidden_or_unknown_tool_calls_are_observed_not_executed` — `approve_proposal`
+  and a mismatching policy number come back as structured errors the model sees;
+  nothing is approved or executable.
+- `test_model_failure_keeps_the_case_processing_and_continues_from_checkpoint` — a
+  retryable model error after step 1 answers 503 and leaves `processing`; the next
+  `/process` continues at step 2 without repeating step 1.
+- `test_interrupted_loop_survives_an_app_restart` — a new app instance over the same
+  SQLite file resumes the interrupted thread after approval.
+- `test_other_guests_cannot_process_or_resume_the_case` — 404 for another guest,
+  401 without a token.
+- `test_extraction_feeds_the_loop_without_creating_a_proposal` — free-text intake is
+  extracted into `requested_changes`/`policy_number` and shown to the model with
+  the extraction notes; only the model's tool creates version 1, and that first
+  proposal still pauses on the extraction's unsupported item.
+- `test_stalled_running_job_is_refused_until_retried` — a job left `running` by a
+  dead process makes `/process` answer 409; `/retry` runs the attempt, and a later
+  `/retry` after approval resumes and completes. The crash-continue test above also
+  asserts the failed job record, `processing_failed`, and the `/retry` path.
+
+### Adversarial runs — criteria 6, 9, 11, 12 (A08)
+
+All in [test_adversarial.py](../tests/test_adversarial.py); the scripted model acts
+as if steered by injected text.
+
+- `test_steered_model_cannot_skip_evidence_approve_or_cross_policies` — apply before
+  any proposal, a mismatching policy number, and a submission without evidence all
+  fail as structured results; the case pauses, cannot be approved or executed, and
+  the other policy's values never appear in the prompts.
+- `test_instructions_inside_a_document_never_reach_the_model_or_the_case` — the
+  instruction-bearing PDF is inspected to labeled fields only; its instruction text
+  is absent from every prompt; approval is still required.
+- `test_leaked_identifiers_and_forged_versions_are_useless_to_the_model` — another
+  case's attachment ID, a forged version, an unsupported field, and a premature
+  confirmation all fail without side effects.
+- `test_agent_cannot_reach_another_workspace_even_with_its_case_id`.
+
 ### Persistence, concurrency, and failure recovery — criteria 8, 9, 10
+
+`test_intake_is_persisted_before_processing` and
+`test_processing_failure_keeps_intake_retryable` (test_workflow.py) also assert the
+durable job record: `waiting` after a successful rule-based run, `failed`/retryable
+with a `processing_failed` event after a simulated crash, and `attempts` counting
+the retry.
 
 - `test_paused_case_approval_and_receipt_survive_restart` — **1 case.** Recreates
   application instances against a temporary SQLite file at received, approved, and
@@ -246,6 +346,9 @@ uv run pytest -q --tb=short
 uv run pytest -q --tb=short -k 'intake or processing'
 uv run pytest -q --tb=short tests/test_attachments.py
 uv run pytest -q --tb=short tests/test_extraction.py
+uv run pytest -q --tb=short tests/test_tools.py
+uv run pytest -q --tb=short tests/test_agent.py
+uv run pytest -q --tb=short tests/test_adversarial.py
 uv run pytest -q --tb=short -k 'evidence or contact or policy'
 uv run pytest -q --tb=short -k 'approval or stale or rejection'
 uv run pytest -q --tb=short -k 'guest or broker or assignment or authentication'
@@ -261,8 +364,9 @@ The [CI workflow](../.github/workflows/ci.yml) runs Python 3.12, lint/format che
 then SQLite and PostgreSQL 17 tests.
 
 For a smoke check, start the API with the README command and run
-`uv run python scripts/demo.py` separately; with `GEMINI_API_KEY` configured the
-last two scenarios call the hosted model. Do not start a server or perform hosted
+`uv run python scripts/demo.py` separately; with `GEMINI_API_KEY` configured every
+`/process` is a live agent run. `uv run python scripts/evaluate_model.py` is the
+labeled live evaluation (exit 0 when every example matches). Do not start a server or perform hosted
 model calls for a documentation-only change, and never add a live model call to
 the pytest suite.
 
@@ -315,9 +419,10 @@ not been selected or installed yet.
   previous proposal's changes), recording failed extraction attempts, and a
   separately labeled live evaluation of grounding on synthetic adversarial text
   (V09/A08). Grounding itself is covered above with fakes.
-- [ ] A02–A08: durable processing jobs and worker retry, typed tools and permission
-  enforcement, tool budgets, genuine selection, human interrupts, checkpoint
-  recovery, and adversarial email/document inputs. Intake/processing separation
+- [ ] A05 worker: a separate worker process, stale-job detection, and concurrent
+  `/process` calls on one case (guarded by the in-process lock and the job's
+  `running` marker, exercised only sequentially). The live evaluation covers seven
+  texts on one model; a broader corpus or other providers are not measured. Intake/processing separation
   itself is covered above (B13).
 - [ ] U01–U07: browser session isolation, actual review/approval flows, stale-state
   feedback, draft labeling, accessible interactions, and visual regression checks.

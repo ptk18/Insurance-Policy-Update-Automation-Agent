@@ -88,6 +88,23 @@ class Attachment(Base):
     created_at: Mapped[str] = mapped_column(default=now)
 
 
+class ProcessingJob(Base):
+    """One durable record per case of the latest processing/resume attempt, so a
+    temporary failure is visible and retryable after the request or process is gone."""
+
+    __tablename__ = "processing_jobs"
+
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    action: Mapped[str]
+    status: Mapped[str]
+    attempts: Mapped[int] = mapped_column(default=0)
+    retryable: Mapped[bool] = mapped_column(default=False)
+    last_error: Mapped[str | None]
+    started_at: Mapped[str] = mapped_column(default=now)
+    updated_at: Mapped[str] = mapped_column(default=now)
+
+
 class Proposal(Base):
     __tablename__ = "proposals"
     __table_args__ = (UniqueConstraint("case_id", "version"),)

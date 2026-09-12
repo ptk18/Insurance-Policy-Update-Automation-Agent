@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from policy_update.documents import inspect_document, safe_filename, sniff_content_type
-from policy_update.extraction import ModelClient, ModelError, extract_request
+from policy_update.extraction import Extraction, ModelClient, ModelError, extract_request
 from policy_update.fixtures import EVIDENCE, evidence_snapshot
 from policy_update.models import (
     Assignment,
@@ -21,6 +21,7 @@ from policy_update.models import (
     Case,
     Execution,
     Policy,
+    ProcessingJob,
     Proposal,
     Workspace,
     now,
@@ -313,11 +314,11 @@ def process_case(session: Session, case: Case, model: ModelClient | None = None)
     return process_free_text(session, case, model)
 
 
-def process_free_text(session: Session, case: Case, model: ModelClient) -> Proposal:
-    """Extract the request with the hosted model, then validate exactly as structured
-    intake. A model failure leaves the case ``received`` so processing can be retried."""
+def extract_into_case(session: Session, case: Case, model: ModelClient):
+    """Run grounded extraction and store its result on the case. A model failure
+    leaves the case unchanged so processing can be retried."""
     try:
-        extraction = extract_request(model, case.original_request)
+        extraction = extract_request(model, case.original_request, case.policy_number)
     except ModelError as error:
         raise DomainError(
             503 if error.retryable else 502,
@@ -332,13 +333,14 @@ def process_free_text(session: Session, case: Case, model: ModelClient) -> Propo
     if case.policy_number is None and extraction.policy_number is not None:
         case.policy_number = extraction.policy_number
     case.requested_changes = extraction.changes
-    audit(
-        session,
-        case,
-        f"model:{model.name}",
-        "request_extracted",
-        extraction.summary(),
-    )
+    audit(session, case, f"model:{model.name}", "request_extracted", extraction.summary())
+    return extraction
+
+
+def process_free_text(session: Session, case: Case, model: ModelClient) -> Proposal:
+    """Extract the request with the hosted model, then validate exactly as structured
+    intake."""
+    extraction = extract_into_case(session, case, model)
     return prepare_proposal(
         session,
         case,
@@ -347,6 +349,136 @@ def process_free_text(session: Session, case: Case, model: ModelClient) -> Propo
         notes=extraction.findings(),
         source="model_extraction",
     )
+
+
+def extraction_findings(session: Session, case: Case) -> list[dict[str, str]]:
+    """Findings from the stored extraction result (unsupported, ambiguous, or dropped
+    items), so the first proposal in agent mode pauses on them exactly like the
+    rule-based path does, whatever the model chose to submit."""
+    event = session.scalars(
+        select(AuditEvent)
+        .where(AuditEvent.case_id == case.id, AuditEvent.action == "request_extracted")
+        .order_by(AuditEvent.created_at.desc())
+    ).first()
+    if event is None:
+        return []
+    return Extraction(
+        policy_number=None,
+        changes={},
+        unsupported=list(event.details.get("unsupported") or []),
+        ambiguities=list(event.details.get("ambiguities") or []),
+        dropped=dict(event.details.get("dropped") or {}),
+        usage={},
+    ).findings()
+
+
+def begin_agent_processing(session: Session, case: Case, model: ModelClient | None):
+    """Move a received case into ``processing`` for the agent loop, extracting free
+    text first. A case already ``processing`` continues from its checkpoint."""
+    if case.status == "processing":
+        return
+    if case.status != "received":
+        raise DomainError(409, "This case has already been processed")
+    if case.requested_changes is None and model is not None:
+        extract_into_case(session, case, model)
+    case.status = "processing"
+    audit(session, case, "system:agent-loop", "processing_started", {"mode": "agent"})
+    session.flush()
+
+
+def start_job(session: Session, case: Case, action: str, retry: bool = False) -> ProcessingJob:
+    """Record an attempt before running it. A job still marked ``running`` is refused
+    unless the caller is an explicit retry, which is how a run whose process died
+    mid-step is recovered."""
+    job = session.get(ProcessingJob, case.id, with_for_update=True)
+    if job is None:
+        job = ProcessingJob(
+            case_id=case.id, workspace_id=case.workspace_id, action=action, attempts=0
+        )
+        session.add(job)
+    elif job.status == "running" and not retry:
+        raise DomainError(409, "This case is already being processed; retry if it stalled")
+    job.action = action
+    job.status = "running"
+    job.attempts += 1
+    job.retryable = False
+    job.last_error = None
+    job.updated_at = now()
+    session.flush()
+    return job
+
+
+def finish_job(session: Session, case: Case, status: str):
+    job = session.get(ProcessingJob, case.id, with_for_update=True)
+    job.status = status
+    job.updated_at = now()
+    audit(
+        session, case, "system:job", "processing_finished", {"action": job.action, "status": status}
+    )
+
+
+def fail_job(session: Session, case: Case, detail: str, retryable: bool):
+    job = session.get(ProcessingJob, case.id, with_for_update=True)
+    job.status = "failed"
+    job.retryable = retryable
+    job.last_error = detail[:300]
+    job.updated_at = now()
+    audit(
+        session,
+        case,
+        "system:job",
+        "processing_failed",
+        {
+            "action": job.action,
+            "attempt": job.attempts,
+            "error": job.last_error,
+            "retryable": retryable,
+        },
+    )
+
+
+def job_view(session: Session, case: Case) -> dict[str, Any] | None:
+    job = session.get(ProcessingJob, case.id)
+    if job is None:
+        return None
+    return {
+        key: getattr(job, key)
+        for key in (
+            "action",
+            "status",
+            "attempts",
+            "retryable",
+            "last_error",
+            "started_at",
+            "updated_at",
+        )
+    }
+
+
+def next_action(case: Case, agent_enabled: bool) -> str:
+    """Which attempt applies to this case now: ``process`` a received case, ``continue``
+    a loop interrupted by a failure, or ``resume`` after a human event."""
+    if case.status == "received":
+        return "process"
+    if not agent_enabled:
+        raise DomainError(409, "This case has already been processed")
+    if case.status == "processing":
+        return "continue"
+    if case.status in {"approved", "awaiting_information"}:
+        return "resume"
+    resume_event(case)  # raises the specific reason
+    raise DomainError(409, f"A {case.status} case has nothing to process")
+
+
+def resume_event(case: Case) -> str:
+    """Which human event lets the agent loop continue."""
+    if case.status == "approved":
+        return "approval"
+    if case.status == "awaiting_information":
+        return "reply"
+    if case.status == "awaiting_approval":
+        raise DomainError(409, "Approve or reject the current proposal before resuming")
+    raise DomainError(409, f"A {case.status} case cannot be resumed")
 
 
 def edit_proposal(session: Session, case: Case, data: ProposalEdit):
@@ -481,7 +613,11 @@ def case_view(session: Session, case: Case):
     # Fail closed if a servicing assignment is removed after proposal preparation.
     # Unprocessed and blocked cases hold no policy snapshot, so they stay readable.
     _, access_error = policy_for_case(session, case)
-    if access_error == "broker_denied" and case.status not in {"received", "blocked"}:
+    if access_error == "broker_denied" and case.status not in {
+        "received",
+        "processing",
+        "blocked",
+    }:
         raise DomainError(403, "Policy unavailable")
     proposals = session.scalars(
         select(Proposal).where(Proposal.case_id == case.id).order_by(Proposal.version)
@@ -506,6 +642,7 @@ def case_view(session: Session, case: Case):
         "requested_changes": case.requested_changes,
         "attachments": [attachment_view(attachment) for attachment in attachments],
         "status": case.status,
+        "job": job_view(session, case),
         "current_version": case.current_version,
         "follow_up_draft": case.follow_up,
         "confirmation_draft": case.confirmation,
