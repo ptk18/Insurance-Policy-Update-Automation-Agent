@@ -92,8 +92,8 @@ attachments inspected by [documents.py](../src/policy_update/documents.py).
 - [ ] E04 — **Partial:** PDF text layers are inspected deterministically for labeled
   `Account holder`/`Service address` lines with page references, unreadable and
   uncertain reasons, and no effect from other document text. Image documents are
-  stored and validated but inspection reports them uncertain until the hosted model
-  adapter (A01) exists; no OCR runs.
+  stored and validated but inspection reports them uncertain; image/OCR inspection
+  through the model adapter is deferred (A01 shipped text-only).
 - [x] E05 — `evidence_id` on intake replies accepts a fixture name or a same-case
   attachment ID; an upload to a `received` case binds automatically, later uploads
   bind through a reply, which creates a new version and invalidates approval. Every
@@ -106,13 +106,21 @@ attachments inspected by [documents.py](../src/policy_update/documents.py).
 
 ## 3. Bounded agent and durable processing
 
-B13 and E02–E05 are in place, so both the contact-only and PDF address paths can
-attach to `process_case`. Image inspection needs A01. No LangGraph/model
-dependencies or agent worker exist in the current tree.
+B13 and E02–E05 are in place, so both the contact-only and PDF address paths
+attach to `process_case`; A01 adds model extraction for free-text intake. No
+LangGraph dependency or agent worker exists in the current tree.
 
-- [ ] A01 — Select one hosted model/provider and implement its adapter, structured
-  request extraction, and handling of unsupported or ambiguous English requests.
-  Missing policy numbers must remain unresolved, never inferred from identity.
+- [x] A01 — Provider: Gemini (`gemini-3.8-flash` by default, `GEMINI_MODEL`
+  override) through `generateContent` REST with a JSON response schema;
+  `GEMINI_API_KEY` is loaded explicitly from `.env` by
+  [settings.py](../src/policy_update/settings.py). Free-text intake (no `changes`)
+  is extracted by [extraction.py](../src/policy_update/extraction.py) and grounded:
+  values not verbatim in the text are dropped (`unverified_extraction`), the policy
+  number is never inferred from a name, and unsupported/ambiguous wording pauses the
+  case (`unsupported_request`/`ambiguous_request`). Model failures return 503/502
+  and leave the case `received`. Text only: image document inspection through the
+  model is deferred (E04 stays partial). Verified live on synthetic text
+  (2026-09-12); the test suite uses scripted fakes and a mocked transport.
 - [ ] A02 — Expose typed, case/workspace-scoped tools for all eight responsibilities
   in the plan. **Partial:** domain validation, authorization, proposals, execution,
   and drafts exist; model-facing tool contracts and registration do not.
@@ -123,11 +131,14 @@ dependencies or agent worker exist in the current tree.
 - [ ] A05 — Persist LangGraph checkpoints and processing jobs independently of the
   browser request, including recovery after a worker restart.
 - [ ] A06 — Persist temporary failures and expose manual processing/execution retry.
-  **Partial:** execution retries already preserve approval and idempotency, and a
-  failed `/process` request leaves the intake `received` so it can be resubmitted;
-  there is no worker retry API or durable failed/retryable job state.
+  **Partial:** execution retries already preserve approval and idempotency, a
+  failed or model-unavailable `/process` request leaves the intake `received` so it
+  can be resubmitted, and the Gemini client retries once (honouring `Retry-After`);
+  there is no worker retry API or durable failed/retryable job state, and a failed
+  extraction attempt is not recorded.
 - [ ] A07 — Record tool calls, outcomes, and concise decision summaries. **Partial:**
-  domain audit events exist; model tool execution history does not.
+  domain audit events and the `request_extracted` event (grounded fields, dropped
+  values, token usage) exist; model tool execution history does not.
 - [ ] A08 — Test tool boundaries, malicious email/document instructions, model
   errors, interruption/resumption, and budget exhaustion with deterministic fakes;
   separately evaluate authorized hosted-model runs on synthetic examples.
@@ -158,16 +169,18 @@ Evidence: [tests](../tests/test_workflow.py),
 [CI configuration](../.github/workflows/ci.yml), and
 [demo script](../scripts/demo.py).
 
-- [x] V01 — Add backend regression tests: 29 test functions / 40 parameterized
-  cases across two modules. See the testing guide for assertions and gaps.
+- [x] V01 — Add backend regression tests: 40 test functions / 59 parameterized
+  cases across three modules. See the testing guide for assertions and gaps.
 - [x] V02 — Verify the backend suite locally on SQLite and PostgreSQL; verify lint
-  and formatting. E02–E06 session (2026-09-12): 40 passed on SQLite and on a
-  dedicated local PostgreSQL test database; `ruff check`/`ruff format --check` clean.
+  and formatting. A01 session (2026-09-12): 59 passed on SQLite and on a dedicated
+  local PostgreSQL test database; `ruff check`/`ruff format --check` clean.
 - [x] V03 — Configure CI to run lint/format and tests on SQLite/PostgreSQL 17.
   Hosted CI execution is not yet verified.
 - [x] V04 — Run a local API smoke script for contact-only, missing evidence/resume,
-  conflict/correction, and uploaded-PDF conflict/correction scenarios, with
-  duplicate execution checks on the fixture scenarios (rerun 2026-09-12).
+  conflict/correction, uploaded-PDF conflict/correction, and (with a configured
+  key) live free-text extraction and unsupported-change pause scenarios, with
+  duplicate execution checks on the fixture scenarios (rerun 2026-09-12 against
+  Gemini).
 - [ ] V05 — Add versioned migrations and verify upgrades with retained demo data.
 - [ ] V06 — Add guest expiry/cleanup, resource limits, private storage configuration,
   and safe operational logging appropriate to the public demo.
@@ -185,8 +198,9 @@ Numbers refer to the twelve criteria in [plan.md](plan.md). These are readiness
 notes, not an assertion that the full deployed product passes acceptance.
 
 1. **Partial:** isolated guests and samples via API (B02/E01); guest UI absent (U02).
-2. **Partial:** fixture- and PDF-backed proposals work (B06/B08/E04); model tool
-   selection and image inspection are absent (A01–A04).
+2. **Partial:** fixture- and PDF-backed proposals work and free-text requests are
+   extracted with grounding (B06/B08/E04/A01); model tool selection and image
+   inspection are absent (A02–A04).
 3. **Backend covered:** contact-only proceeds without attachment (B04/B09/V01);
    demonstrate it through the agent and UI (A03/U02–U04).
 4. **Backend covered:** missing number/evidence, scanned, and unlabeled PDFs pause
@@ -209,8 +223,9 @@ notes, not an assertion that the full deployed product passes acceptance.
 11. **Cases/policies/attachments covered:** API tenant isolation exists
     (B02/E03/V01); browser session separation remains (U02).
 12. **Partial:** raw request text, forged approval input, and instruction text
-    inside an uploaded PDF cannot bypass the current API (E06). No LLM injection
-    evaluation exists (A08).
+    inside an uploaded PDF cannot bypass the current API (E06); extracted values
+    are limited to text that is actually present and still pass authorization
+    (A01). No adversarial evaluation of the hosted model itself exists (A08).
 
 ## Later phases
 
@@ -221,7 +236,7 @@ notes, not an assertion that the full deployed product passes acceptance.
   matching, access configuration, and outbound-message policy with separate tests.
   Real sending is outside the initial demo.
 
-Next work: A01–A05 (model adapter including image inspection, typed tools,
-LangGraph loop, interrupts, durable jobs), which attach to `process_case` and the
-stored attachments without changing intake. UI work can proceed against existing
+Next work: A02–A05 (typed tools, LangGraph loop, interrupts, durable jobs) and
+the deferred image inspection through the adapter (E04), which attach to
+`process_case` and the stored attachments without changing intake. UI work can proceed against existing
 endpoints once U01 establishes its baseline.

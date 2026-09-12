@@ -24,12 +24,15 @@ Build a synthetic-data health insurance policy update demo. Only policyholder
 mailing address, email, and phone updates are permitted. Prioritize one working
 core workflow before case chat or real inbox integration.
 
-The current implementation is a backend foundation with structured review inputs,
-server-owned evidence fixtures, and PDF/image attachments with deterministic PDF
-text-layer inspection. LLM processing (including image inspection), LangGraph
+The current implementation is a backend foundation with structured or free-text
+review inputs, server-owned evidence fixtures, PDF/image attachments with
+deterministic PDF text-layer inspection, and a text-only Gemini adapter
+(`GEMINI_API_KEY` loaded from `.env`) that extracts requested changes and pauses
+unsupported or ambiguous requests. Image/OCR inspection, the LangGraph tool loop,
 persistence/jobs, the Next.js dashboard, and deployment remain pending. Check the
 code before describing a planned feature as implemented, and update the README when
-that status changes.
+that status changes. Tests must pass `model=None` or a scripted fake to
+`create_app`; never call the hosted model from the suite.
 
 Do not introduce real insurance records, outbound email, a vector database, model
 training, multi-agent architecture, or a separate planning service for this scope.
@@ -46,13 +49,17 @@ Keep illustrative business rules and synthetic measurements labeled as such.
 - `src/policy_update/schemas.py`: strict Pydantic request contracts.
 - `src/policy_update/validation.py`: permitted fields and evidence/contact checks.
 - `src/policy_update/documents.py`: attachment type sniffing and labeled-field PDF
-  inspection; image inspection waits for the model adapter.
+  inspection; image inspection is deferred (no OCR).
+- `src/policy_update/extraction.py`: hosted-model adapter (Gemini `generateContent`
+  over REST with a JSON schema), verbatim grounding of extracted values, and
+  retryable/non-retryable model errors. `settings.py` loads `.env` explicitly.
 - `src/policy_update/fixtures.py`: fictional brokers, evidence, sample requests, and
   sample document metadata; `assets/` holds the generated synthetic PDFs/PNG
   (regenerate with `scripts/make_evidence_assets.py`).
-- `tests/`: workflow, isolation, approval, concurrency, recovery, and attachment
-  tests; `tests/helpers.py` holds shared API helpers.
-- `scripts/demo.py`: four local API scenarios with simulated reviewer approvals.
+- `tests/`: workflow, isolation, approval, concurrency, recovery, attachment, and
+  extraction tests; `tests/helpers.py` holds shared API helpers and `FakeModel`.
+- `scripts/demo.py`: local API scenarios with simulated reviewer approvals; the
+  free-text scenarios run only when the server reports a configured model.
 - `.github/workflows/ci.yml`: SQLite and PostgreSQL checks.
 
 ## Invariants to preserve

@@ -13,11 +13,15 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from policy_update import service
 from policy_update.database import initialize_database, make_database
+from policy_update.extraction import ModelClient, model_from_env
 from policy_update.fixtures import BROKERS, DOCUMENTS, EVIDENCE, SAMPLES, document_bytes
 from policy_update.models import Case, Workspace
 from policy_update.schemas import BrokerId, Intake, ProposalEdit, Rejection, Reply, VersionAction
+from policy_update.settings import load_env_file
 
 bearer = HTTPBearer(auto_error=False)
+# Sentinel: "configure the model from the environment" as opposed to an explicit None.
+FROM_ENV = object()
 
 
 def session_dependency(request: Request):
@@ -58,7 +62,16 @@ def file_response(content: bytes, content_type: str, filename: str) -> Response:
     )
 
 
-def create_app(database_url: str | None = None, max_attachment_bytes: int | None = None) -> FastAPI:
+def create_app(
+    database_url: str | None = None,
+    max_attachment_bytes: int | None = None,
+    model: ModelClient | None | object = FROM_ENV,
+) -> FastAPI:
+    """``model`` defaults to the provider configured through ``.env``/environment
+    (``GEMINI_API_KEY``). Tests pass an explicit fake or ``None`` so no live call happens."""
+    if model is FROM_ENV:
+        load_env_file()
+        model = model_from_env()
     engine, sessions = make_database(
         database_url or os.environ.get("DATABASE_URL", "sqlite:///./policy_demo.db")
     )
@@ -75,12 +88,14 @@ def create_app(database_url: str | None = None, max_attachment_bytes: int | None
     app = FastAPI(
         title="Insurance Policy Update — backend foundation",
         version="0.1.0",
-        description="Synthetic-data review API. Structured inputs and fixture evidence; "
-        "LLM processing, file uploads, and the dashboard are not implemented yet.",
+        description="Synthetic-data review API. Structured or free-text intake, uploaded "
+        "PDF evidence, and text-only hosted-model extraction; image inspection, the "
+        "agent worker, and the dashboard are not implemented yet.",
         lifespan=lifespan,
     )
     app.state.sessions = sessions
     app.state.engine = engine
+    app.state.model = model
 
     @app.exception_handler(service.DomainError)
     async def domain_error(_request, error):
@@ -109,7 +124,7 @@ def create_app(database_url: str | None = None, max_attachment_bytes: int | None
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        return {"status": "ok", "extraction": model.name if model else "unconfigured"}
 
     @app.post("/workspaces", status_code=201)
     def new_workspace(session: Db):
@@ -156,7 +171,7 @@ def create_app(database_url: str | None = None, max_attachment_bytes: int | None
     @app.post("/cases/{case_id}/process")
     def process(case_id: str, session: Db, guest: Guest):
         case = service.get_case(session, guest.id, case_id)
-        service.process_case(session, case)
+        service.process_case(session, case, model)
         return service.case_view(session, case)
 
     @app.post("/cases/{case_id}/attachments", status_code=201)

@@ -10,7 +10,9 @@ from policy_update.api import create_app
 def app(tmp_path):
     # Every test gets fresh guests. No database cleanup or shared-data deletion is needed.
     url = os.environ.get("TEST_DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
-    return create_app(url)
+    # model=None: never load .env or call a hosted model from the suite. Extraction
+    # tests build their own app around a scripted FakeModel.
+    return create_app(url, model=None)
 
 
 @pytest.fixture

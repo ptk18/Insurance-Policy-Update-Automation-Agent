@@ -101,7 +101,34 @@ def main():
     request("POST", path + "/approve", version)
     request("POST", path + "/execute", version)
     print(f"  {request('GET', path)['status']} with uploaded-document evidence.")
-    print("All four synthetic scenarios finished. No email was sent.")
+    # Fifth scenario: free-text intake extracted by the hosted model, when configured.
+    extraction = request("GET", "/health")["extraction"]
+    if extraction == "unconfigured":
+        print("Skipped free-text extraction: no GEMINI_API_KEY configured on the server.")
+        print("All four synthetic scenarios finished. No email was sent.")
+        return
+    for sample in (samples[4], samples[5]):
+        case = request("POST", "/cases", sample["intake"])
+        path = f"/cases/{case['id']}"
+        try:
+            case = request("POST", path + "/process")
+        except HTTPError as error:
+            if error.code not in (502, 503):
+                raise
+            print(f"{sample['title']}: model unavailable (HTTP {error.code}); still received.")
+            continue
+        print(f"{sample['title']} via {extraction}: {case['status']}")
+        findings = case["proposals"][-1]["findings"]
+        print(f"  extracted changes: {case['requested_changes']}; policy {case['policy_number']}")
+        if case["status"] == "awaiting_information":
+            print("  " + "; ".join(finding["code"] for finding in findings))
+            print(f"  {case['follow_up_draft']}")
+            continue
+        version = {"version": case["current_version"]}
+        request("POST", path + "/approve", version)
+        request("POST", path + "/execute", version)
+        print(f"  {request('GET', path)['status']} after human approval.")
+    print("All synthetic scenarios finished. No email was sent.")
 
 
 if __name__ == "__main__":

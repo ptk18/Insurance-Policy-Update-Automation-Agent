@@ -6,25 +6,33 @@ below refer to [plan.md](plan.md).
 
 ## What exists today
 
-[test_workflow.py](../tests/test_workflow.py) (22 functions / 29 cases) and
-[test_attachments.py](../tests/test_attachments.py) (7 functions / 11 cases) total
-**29 test functions, producing 40 cases after parameterization**. They exercise the
-FastAPI API with a real SQLAlchemy database through TestClient. There are no
-frontend, LangGraph, hosted-model, or image-inspection tests yet. This is a behavior
-inventory, not a measured line/branch coverage report.
+[test_workflow.py](../tests/test_workflow.py) (22 functions / 29 cases),
+[test_attachments.py](../tests/test_attachments.py) (7 functions / 11 cases), and
+[test_extraction.py](../tests/test_extraction.py) (11 functions / 19 cases) total
+**40 test functions, producing 59 cases after parameterization**. They exercise the
+FastAPI API with a real SQLAlchemy database through TestClient. Hosted-model
+behavior is covered only through scripted fakes and a mocked HTTP transport; there
+are no live-model, frontend, LangGraph, or image-inspection tests. This is a
+behavior inventory, not a measured line/branch coverage report.
 
-The E02–E06 session (2026-09-12) ran all 40 cases on SQLite and on a dedicated local
-PostgreSQL test database, plus lint/format checks and the four live API smoke
-scenarios. CI is configured, but a hosted run has not been verified.
+The A01 session (2026-09-12) ran all 59 cases on SQLite and on a dedicated local
+PostgreSQL test database, plus lint/format checks and the six live API smoke
+scenarios (two of them against Gemini). CI is configured, but a hosted run has not
+been verified.
 
 [helpers.py](../tests/helpers.py) provides `submit` (intake expecting `received`,
-then `POST /cases/{id}/process`), `action`, and `policy`; use `submit` unless a test
-is about the intake/processing boundary. `test_attachments.py` adds local `sample`,
-`upload`, `reply_with`, and `intake` helpers.
+then `POST /cases/{id}/process`), `action`, `policy`, and `FakeModel`/`answer` (a
+scripted model whose queued items are raw answers or exceptions; an unscripted
+call fails loudly). `conftest.py` builds the app with `model=None`, so the suite
+never loads `.env` or calls a hosted model; extraction tests override `app` with a
+`FakeModel`. Use `submit` unless a test is about the intake/processing boundary.
+`test_attachments.py` adds local `sample`, `upload`, `reply_with`, and `intake`
+helpers.
 
 ## Find existing coverage
 
-All test names below are in [test_workflow.py](../tests/test_workflow.py). Use an
+Test names below are in [test_workflow.py](../tests/test_workflow.py) unless a
+section says otherwise. Use an
 exact name with `pytest tests/test_workflow.py::TEST_NAME`, or a keyword group from
 the commands below. Extend an existing scenario when it already owns the behavior.
 
@@ -139,6 +147,50 @@ inspected.
   over SQLite the attachment bytes and the `received` case's evidence binding remain
   and processing succeeds.
 
+### Free-text extraction and the model adapter — criteria 2, 4, 6, 12 (A01)
+
+All in [test_extraction.py](../tests/test_extraction.py). No test calls a hosted
+model; live behavior is checked only by the demo script with a configured key.
+
+- `test_free_text_intake_is_extracted_grounded_and_processed` — **1 case.** An
+  intake without `changes` or `policy_number` is sent once to the fake; the grounded
+  policy number and contact fields land on the case, `request_extracted`
+  (actor `model:<name>`) and `proposal_validated` (`source: model_extraction`) are
+  audited, and approval/execution apply exactly the extracted values.
+- `test_structured_intake_never_calls_the_model` — **1 case.** Structured intake
+  processes without any model call; `/health` names the configured provider.
+- `test_unsupported_or_ambiguous_requests_pause_for_review` — **2 cases:** an
+  unsupported request and an ambiguity each pause with their finding code and a
+  follow-up draft quoting the item; a reviewer proposal edit resolves it without a
+  second model call and without carrying the notes forward.
+- `test_values_not_stated_in_the_text_are_dropped` — **4 cases:** a policy number
+  inferred from a name, an email absent from the text, a phone with different
+  digits, and an address with different wording are dropped, audited under
+  `dropped`, and pause the case with `unverified_extraction`; the policy number
+  stays unresolved (`missing_policy`).
+- `test_injected_policy_number_cannot_escalate_access` — **1 case.** A policy number
+  injected into the text survives grounding but still fails the broker assignment
+  check: the case is `blocked` and cannot be approved.
+- `test_model_failure_keeps_intake_retryable` — **1 case.** A retryable error yields
+  503, a non-retryable one 502; the case stays `received` with no extraction event,
+  and a later `/process` succeeds.
+- `test_unconfigured_model_falls_back_to_structured_intake` — **1 case.** With
+  `model=None`, `/health` reports `unconfigured` and free-text intake pauses with
+  `missing_changes`.
+- `test_gemini_client_sends_schema_and_keeps_the_key_out_of_the_url` — **1 case.**
+  Through `httpx.MockTransport`: model path, `x-goog-api-key` header only, JSON
+  response schema and system instruction in the body, parsed data and token usage.
+- `test_gemini_client_maps_failures` — **5 cases:** 429 then 503 (retried once,
+  retryable), 401 (single attempt, not retryable), empty candidates (retryable, not
+  retried in-client), `MAX_TOKENS` finish (not retryable), and transport errors;
+  error details never contain the key.
+- `test_gemini_client_retries_once_then_succeeds` — **1 case.**
+- `test_env_file_is_loaded_explicitly_without_overriding_the_shell` — **1 case.**
+  Comments, `export`, quoted values with trailing comments, invalid names, and
+  non-assignments are handled; shell variables win; only names are returned;
+  `model_from_env` and the app factory (`POLICY_UPDATE_ENV_FILE`) build the client
+  without a network call.
+
 ### Persistence, concurrency, and failure recovery — criteria 8, 9, 10
 
 - `test_paused_case_approval_and_receipt_survive_restart` — **1 case.** Recreates
@@ -193,6 +245,7 @@ uv run pytest --collect-only -q
 uv run pytest -q --tb=short
 uv run pytest -q --tb=short -k 'intake or processing'
 uv run pytest -q --tb=short tests/test_attachments.py
+uv run pytest -q --tb=short tests/test_extraction.py
 uv run pytest -q --tb=short -k 'evidence or contact or policy'
 uv run pytest -q --tb=short -k 'approval or stale or rejection'
 uv run pytest -q --tb=short -k 'guest or broker or assignment or authentication'
@@ -208,8 +261,10 @@ The [CI workflow](../.github/workflows/ci.yml) runs Python 3.12, lint/format che
 then SQLite and PostgreSQL 17 tests.
 
 For a smoke check, start the API with the README command and run
-`uv run python scripts/demo.py` separately. Do not start a server or perform paid
-model calls for a documentation-only change.
+`uv run python scripts/demo.py` separately; with `GEMINI_API_KEY` configured the
+last two scenarios call the hosted model. Do not start a server or perform hosted
+model calls for a documentation-only change, and never add a live model call to
+the pytest suite.
 
 ## How to add useful tests
 
@@ -254,9 +309,13 @@ not been selected or installed yet.
 
 ### Features not yet implemented
 
-- [ ] E04 image path: OCR/model inspection of PNG/JPEG documents once A01 exists;
-  today images are only stored and reported uncertain.
-- [ ] A01–A08: durable processing jobs and worker retry, typed tools and permission
+- [ ] E04 image path: OCR/model inspection of PNG/JPEG documents through the
+  adapter; today images are only stored and reported uncertain.
+- [ ] A01 follow-ups: extraction from reply text (replies currently reuse the
+  previous proposal's changes), recording failed extraction attempts, and a
+  separately labeled live evaluation of grounding on synthetic adversarial text
+  (V09/A08). Grounding itself is covered above with fakes.
+- [ ] A02–A08: durable processing jobs and worker retry, typed tools and permission
   enforcement, tool budgets, genuine selection, human interrupts, checkpoint
   recovery, and adversarial email/document inputs. Intake/processing separation
   itself is covered above (B13).

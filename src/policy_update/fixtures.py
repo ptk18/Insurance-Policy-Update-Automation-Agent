@@ -79,6 +79,25 @@ SAMPLES = [
             "evidence_id": "conflicting-address",
         },
     },
+    # Free-text intakes carry no ``changes``; processing extracts them with the hosted
+    # model when one is configured (GEMINI_API_KEY), otherwise they pause for review.
+    {
+        "title": "Free-text contact update (model extraction)",
+        "intake": {
+            "broker_id": "broker-alex",
+            "original_request": "Hi, this is Alex Morgan. Policy DEMO-1001: Sam Taylor has a "
+            "new phone number, +1 202 555 0177, and a new email, sam.taylor@example.net. "
+            "Thanks!",
+        },
+    },
+    {
+        "title": "Free-text request with an unsupported change (pauses for review)",
+        "intake": {
+            "broker_id": "broker-alex",
+            "original_request": "Please update the email for Sam Taylor on policy DEMO-1001 "
+            "to sam.new@example.com and also increase the liability coverage to $2M.",
+        },
+    },
 ]
 
 

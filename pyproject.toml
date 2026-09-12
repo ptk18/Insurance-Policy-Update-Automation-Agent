@@ -11,12 +11,12 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "pypdf>=5,<7",
   "python-multipart>=0.0.20,<1",
+  "httpx>=0.28,<1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8,<10",
-    "httpx>=0.28,<1",
     "ruff>=0.11,<1",
     "pillow>=11,<13",
 ]

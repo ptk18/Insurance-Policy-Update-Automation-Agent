@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from policy_update.documents import inspect_document, safe_filename, sniff_content_type
+from policy_update.extraction import ModelClient, ModelError, extract_request
 from policy_update.fixtures import EVIDENCE, evidence_snapshot
 from policy_update.models import (
     Assignment,
@@ -207,7 +208,16 @@ def store_attachment(
     return attachment
 
 
-def prepare_proposal(session: Session, case: Case, changes: dict[str, str], actor: str) -> Proposal:
+def prepare_proposal(
+    session: Session,
+    case: Case,
+    changes: dict[str, str],
+    actor: str,
+    notes: list[dict[str, str]] | None = None,
+    source: str = "structured_review_input",
+) -> Proposal:
+    """``notes`` are extra findings (for example unsupported or ambiguous wording found by
+    request extraction) that pause the case alongside the domain validation."""
     require_editable(case)
     policy, error = policy_for_case(session, case)
     if error == "broker_denied" and case.current_version:
@@ -224,6 +234,8 @@ def prepare_proposal(session: Session, case: Case, changes: dict[str, str], acto
         findings = [{"code": error, "message": messages[error]}]
     else:
         findings = validate_changes(changes, policy, evidence)
+    if notes and error != "broker_denied":
+        findings = [*notes, *findings]
 
     if case.current_version:
         previous = current_proposal(session, case, case.current_version)
@@ -258,7 +270,7 @@ def prepare_proposal(session: Session, case: Case, changes: dict[str, str], acto
         case,
         actor,
         "proposal_validated",
-        {"outcome": case.status, "findings": findings, "source": "structured_review_input"},
+        {"outcome": case.status, "findings": findings, "source": source},
         proposal.version,
     )
     session.flush()
@@ -289,13 +301,51 @@ def create_case(session: Session, workspace_id: str, data: Intake) -> Case:
     return case
 
 
-def process_case(session: Session, case: Case) -> Proposal:
-    # Synchronous rule-based stand-in for the planned worker; the row lock taken by
-    # get_case plus the received-only guard keep concurrent processing single-shot.
+def process_case(session: Session, case: Case, model: ModelClient | None = None) -> Proposal:
+    # Synchronous stand-in for the planned worker; the row lock taken by get_case plus
+    # the received-only guard keep concurrent processing single-shot.
     if case.status != "received":
         raise DomainError(409, "This case has already been processed")
+    if case.requested_changes is not None or model is None:
+        return prepare_proposal(
+            session, case, case.requested_changes or {}, "system:structured-processing"
+        )
+    return process_free_text(session, case, model)
+
+
+def process_free_text(session: Session, case: Case, model: ModelClient) -> Proposal:
+    """Extract the request with the hosted model, then validate exactly as structured
+    intake. A model failure leaves the case ``received`` so processing can be retried."""
+    try:
+        extraction = extract_request(model, case.original_request)
+    except ModelError as error:
+        raise DomainError(
+            503 if error.retryable else 502,
+            "Request extraction is unavailable; the case is still received and can be "
+            "processed again"
+            if error.retryable
+            else "Request extraction failed; check the model configuration or submit a "
+            "new case with structured changes",
+        ) from error
+    # The policy number is only ever the one stated in the text, never one inferred
+    # from the requester's or policyholder's name.
+    if case.policy_number is None and extraction.policy_number is not None:
+        case.policy_number = extraction.policy_number
+    case.requested_changes = extraction.changes
+    audit(
+        session,
+        case,
+        f"model:{model.name}",
+        "request_extracted",
+        extraction.summary(),
+    )
     return prepare_proposal(
-        session, case, case.requested_changes or {}, "system:structured-processing"
+        session,
+        case,
+        extraction.changes,
+        "system:model-extraction",
+        notes=extraction.findings(),
+        source="model_extraction",
     )
 
 
