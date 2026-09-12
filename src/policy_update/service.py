@@ -11,9 +11,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from policy_update.fixtures import evidence_snapshot
+from policy_update.documents import inspect_document, safe_filename, sniff_content_type
+from policy_update.fixtures import EVIDENCE, evidence_snapshot
 from policy_update.models import (
     Assignment,
+    Attachment,
     AuditEvent,
     Case,
     Execution,
@@ -114,6 +116,8 @@ def get_policy(session: Session, workspace_id: str, number: str, broker_id: str)
 
 
 def current_proposal(session: Session, case: Case, version: int) -> Proposal:
+    if not case.current_version:
+        raise DomainError(409, "This case has not been processed yet")
     if version != case.current_version:
         raise DomainError(409, "Proposal version changed; reload the case")
     proposal = session.scalar(
@@ -129,6 +133,80 @@ def require_editable(case: Case):
         raise DomainError(409, f"A {case.status} case cannot be changed")
 
 
+def get_attachment(session: Session, case: Case, attachment_id: str) -> Attachment:
+    # Scoped to the case, which the caller already resolved within its workspace.
+    attachment = session.scalar(
+        select(Attachment).where(
+            Attachment.id == attachment_id,
+            Attachment.case_id == case.id,
+            Attachment.workspace_id == case.workspace_id,
+        )
+    )
+    if attachment is None:
+        raise DomainError(404, "Attachment not found")
+    return attachment
+
+
+def resolve_evidence(session: Session, case: Case) -> dict[str, Any] | None:
+    """Evidence is either a server-owned fixture or an attachment of this same case."""
+    if case.evidence_id is None:
+        return None
+    if case.evidence_id in EVIDENCE:
+        return evidence_snapshot(case.evidence_id)
+    return get_attachment(session, case, case.evidence_id).inspection
+
+
+def store_attachment(
+    session: Session, case: Case, filename: str | None, content: bytes, limit: int
+) -> Attachment:
+    require_editable(case)
+    if len(content) > limit:
+        raise DomainError(413, f"Attachments are limited to {limit} bytes")
+    if not content:
+        raise DomainError(422, "The uploaded file is empty")
+    content_type = sniff_content_type(content)
+    if content_type is None:
+        raise DomainError(415, "Only PDF, PNG, and JPEG attachments are accepted")
+    attachment = Attachment(
+        workspace_id=case.workspace_id,
+        case_id=case.id,
+        filename=safe_filename(filename),
+        content_type=content_type,
+        size=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        content=content,
+        inspection={},
+    )
+    session.add(attachment)
+    session.flush()
+    attachment.inspection = inspect_document(
+        content,
+        content_type,
+        {"id": attachment.id, "filename": attachment.filename, "content_type": content_type},
+    )
+    # An upload before processing is the evidence the first proposal will inspect.
+    # Later uploads are bound explicitly through a reply so the case is revalidated.
+    bound = case.status == "received"
+    if bound:
+        case.evidence_id = attachment.id
+    audit(
+        session,
+        case,
+        f"reviewer:{case.workspace_id}",
+        "attachment_uploaded",
+        {
+            "attachment_id": attachment.id,
+            "content_type": content_type,
+            "size": attachment.size,
+            "readable": attachment.inspection["readable"],
+            "certain": attachment.inspection["certain"],
+            "bound_as_evidence": bound,
+        },
+    )
+    session.flush()
+    return attachment
+
+
 def prepare_proposal(session: Session, case: Case, changes: dict[str, str], actor: str) -> Proposal:
     require_editable(case)
     policy, error = policy_for_case(session, case)
@@ -136,7 +214,7 @@ def prepare_proposal(session: Session, case: Case, changes: dict[str, str], acto
         # Do not turn a previously accessible case into a blocked view that could
         # reveal its old policy snapshots after servicing access is revoked.
         raise DomainError(403, "Policy unavailable")
-    evidence = evidence_snapshot(case.evidence_id)
+    evidence = resolve_evidence(session, case)
     if error:
         messages = {
             "missing_policy": "Provide the explicit policy number.",
@@ -188,19 +266,37 @@ def prepare_proposal(session: Session, case: Case, changes: dict[str, str], acto
 
 
 def create_case(session: Session, workspace_id: str, data: Intake) -> Case:
+    """Persist intake only. Policy lookup, authorization, and validation happen in
+    ``process_case`` so a stored request survives a processing failure and a future
+    inbox adapter or worker can submit and process the same structure."""
     case = Case(
         workspace_id=workspace_id,
         broker_id=data.broker_id,
         policy_number=data.policy_number,
         original_request=data.original_request,
         evidence_id=data.evidence_id,
+        requested_changes=data.changes.model_dump(exclude_none=True) if data.changes else None,
     )
     session.add(case)
     session.flush()
-    actor = f"reviewer:{workspace_id}"
-    audit(session, case, actor, "case_created", {"broker_id": case.broker_id})
-    prepare_proposal(session, case, data.changes.model_dump(exclude_none=True), actor)
+    audit(
+        session,
+        case,
+        f"reviewer:{workspace_id}",
+        "case_created",
+        {"broker_id": case.broker_id, "source": "structured_intake"},
+    )
     return case
+
+
+def process_case(session: Session, case: Case) -> Proposal:
+    # Synchronous rule-based stand-in for the planned worker; the row lock taken by
+    # get_case plus the received-only guard keep concurrent processing single-shot.
+    if case.status != "received":
+        raise DomainError(409, "This case has already been processed")
+    return prepare_proposal(
+        session, case, case.requested_changes or {}, "system:structured-processing"
+    )
 
 
 def edit_proposal(session: Session, case: Case, data: ProposalEdit):
@@ -229,7 +325,7 @@ def recheck(session: Session, case: Case, proposal: Proposal) -> Policy:
         raise DomainError(403 if error == "broker_denied" else 409, "Policy unavailable")
     if policy.revision != proposal.policy_revision:
         raise DomainError(409, "Policy changed; prepare a new proposal and obtain fresh approval")
-    if evidence_snapshot(case.evidence_id) != proposal.evidence:
+    if resolve_evidence(session, case) != proposal.evidence:
         raise DomainError(409, "Evidence changed; prepare a new proposal")
     if validate_changes(proposal.changes, policy, proposal.evidence):
         raise DomainError(409, "Required checks have not passed")
@@ -315,10 +411,27 @@ def policy_view(policy: Policy):
     }
 
 
+def attachment_view(attachment: Attachment):
+    return {
+        key: getattr(attachment, key)
+        for key in (
+            "id",
+            "case_id",
+            "filename",
+            "content_type",
+            "size",
+            "sha256",
+            "inspection",
+            "created_at",
+        )
+    }
+
+
 def case_view(session: Session, case: Case):
     # Fail closed if a servicing assignment is removed after proposal preparation.
+    # Unprocessed and blocked cases hold no policy snapshot, so they stay readable.
     _, access_error = policy_for_case(session, case)
-    if access_error == "broker_denied" and case.status != "blocked":
+    if access_error == "broker_denied" and case.status not in {"received", "blocked"}:
         raise DomainError(403, "Policy unavailable")
     proposals = session.scalars(
         select(Proposal).where(Proposal.case_id == case.id).order_by(Proposal.version)
@@ -328,6 +441,11 @@ def case_view(session: Session, case: Case):
         .where(AuditEvent.case_id == case.id)
         .order_by(AuditEvent.created_at, AuditEvent.id)
     ).all()
+    attachments = session.scalars(
+        select(Attachment)
+        .where(Attachment.case_id == case.id, Attachment.workspace_id == case.workspace_id)
+        .order_by(Attachment.created_at, Attachment.id)
+    ).all()
     return {
         "id": case.id,
         "broker_id": case.broker_id,
@@ -335,6 +453,8 @@ def case_view(session: Session, case: Case):
         "original_request": case.original_request,
         "replies": case.replies,
         "evidence_id": case.evidence_id,
+        "requested_changes": case.requested_changes,
+        "attachments": [attachment_view(attachment) for attachment in attachments],
         "status": case.status,
         "current_version": case.current_version,
         "follow_up_draft": case.follow_up,

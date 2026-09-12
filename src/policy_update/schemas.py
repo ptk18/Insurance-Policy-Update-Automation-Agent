@@ -1,9 +1,10 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 BrokerId = Literal["broker-alex", "broker-jordan"]
-EvidenceId = Literal["matching-address", "conflicting-address", "wrong-name", "unreadable"]
+# A server-owned fixture name or the ID of an attachment uploaded to the same case.
+EvidenceId = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9-]+$")]
 
 
 class StrictModel(BaseModel):
@@ -28,7 +29,8 @@ class Intake(StrictModel):
     broker_id: BrokerId
     original_request: str = Field(min_length=1, max_length=20000)
     policy_number: str | None = Field(default=None, min_length=1, max_length=80)
-    changes: Changes
+    # Optional so an inbox adapter can submit the same structure before changes are extracted.
+    changes: Changes | None = None
     evidence_id: EvidenceId | None = None
 
 

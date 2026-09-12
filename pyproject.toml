@@ -9,14 +9,21 @@ dependencies = [
   "sqlalchemy>=2.0,<2.1",
   "pydantic[email]>=2.10,<3",
   "psycopg[binary]>=3.2,<4",
+  "pypdf>=5,<7",
+  "python-multipart>=0.0.20,<1",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.11,<1"]
+dev = [
+    "pytest>=8,<10",
+    "httpx>=0.28,<1",
+    "ruff>=0.11,<1",
+    "pillow>=11,<13",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 
 [tool.ruff]
 line-length = 100
@@ -31,3 +38,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/policy_update"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["policy_update", "helpers"]

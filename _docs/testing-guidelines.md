@@ -6,22 +6,43 @@ below refer to [plan.md](plan.md).
 
 ## What exists today
 
-[test_workflow.py](../tests/test_workflow.py) contains **19 test functions, producing
-26 cases after parameterization**. They exercise the FastAPI API with a real
-SQLAlchemy database through TestClient. There are no frontend, document-extraction,
-LangGraph, or hosted-model tests yet. This is a behavior inventory, not a measured
-line/branch coverage report.
+[test_workflow.py](../tests/test_workflow.py) (22 functions / 29 cases) and
+[test_attachments.py](../tests/test_attachments.py) (7 functions / 11 cases) total
+**29 test functions, producing 40 cases after parameterization**. They exercise the
+FastAPI API with a real SQLAlchemy database through TestClient. There are no
+frontend, LangGraph, hosted-model, or image-inspection tests yet. This is a behavior
+inventory, not a measured line/branch coverage report.
 
-The previous backend build session ran all 26 cases successfully on SQLite and
-PostgreSQL, plus lint/format checks and the three live API smoke scenarios.
-This documentation update inventories source assertions; it does not represent a
-new database test run. CI is configured, but a hosted run has not been verified.
+The E02–E06 session (2026-09-12) ran all 40 cases on SQLite and on a dedicated local
+PostgreSQL test database, plus lint/format checks and the four live API smoke
+scenarios. CI is configured, but a hosted run has not been verified.
+
+[helpers.py](../tests/helpers.py) provides `submit` (intake expecting `received`,
+then `POST /cases/{id}/process`), `action`, and `policy`; use `submit` unless a test
+is about the intake/processing boundary. `test_attachments.py` adds local `sample`,
+`upload`, `reply_with`, and `intake` helpers.
 
 ## Find existing coverage
 
 All test names below are in [test_workflow.py](../tests/test_workflow.py). Use an
 exact name with `pytest tests/test_workflow.py::TEST_NAME`, or a keyword group from
 the commands below. Extend an existing scenario when it already owns the behavior.
+
+### Intake and processing separation — criteria 4, 10 (B13)
+
+- `test_intake_is_persisted_before_processing` — **1 case.** Intake returns a
+  `received` case with version 0, no proposals, stored `requested_changes`, and a
+  `case_created` event; it appears in the list. Approve, execute, reject, reply, and
+  edit all return 409 before processing. Processing yields `awaiting_approval` with
+  the stored changes and a `proposal_validated` event; a second process call is 409.
+- `test_processing_failure_keeps_intake_retryable` — **1 case.** Injects an
+  exception in validation during `/process`. The request fails with 500, the case
+  stays `received` with no proposal and its requested changes intact, and a retry
+  processes it normally. This is a request-level failure, not a worker crash.
+- `test_intake_without_changes_pauses_until_reviewer_supplies_them` — **1 case.**
+  Intake without `changes` processes to `awaiting_information` with only a
+  `missing_changes` finding, empty proposal changes, and a draft; approval fails.
+  A reviewer edit creates version 2, which can be approved and executed.
 
 ### Successful updates and validation — criteria 3, 4, 5, 8
 
@@ -67,12 +88,13 @@ the commands below. Extend an existing scenario when it already owns the behavio
   authentication; case listing rejects an invalid bearer token. This is not an
   exhaustive missing-token check on every route.
 - `test_unassigned_broker_cannot_inspect_approve_or_execute` — **1 case.** The wrong
-  seeded broker gets a blocked case without policy before-values; direct policy
-  lookup, approval, execution, and proposal editing are denied.
+  seeded broker's intake is stored as `received` without revealing policy values;
+  processing yields a blocked case without before-values; direct policy lookup,
+  approval, execution, and proposal editing are denied.
 - `test_guest_isolation_for_every_case_endpoint` — **1 case.** A second guest cannot
-  list, read, edit, reply to, approve, reject, or execute the first guest's case.
-  Updating the first guest's policy does not change the second guest's seeded copy.
-  There are no attachment endpoints to test yet.
+  list, read, edit, reply to, approve, reject, execute, or process the first
+  guest's case. Updating the first guest's policy does not change the second
+  guest's seeded copy. There are no attachment endpoints to test yet.
 - `test_request_text_cannot_supply_approval_or_authorization` — **1 case.** A raw
   instruction-like request remains pending and cannot execute without approval.
   An extra `approved_by` input is rejected and its raw value is omitted from the
@@ -81,13 +103,50 @@ the commands below. Extend an existing scenario when it already owns the behavio
   Removing the servicing assignment after approval blocks detail, execution, edit,
   and reply operations, including attempts to reopen old proposal values.
 
+### Uploaded documents and inspection — criteria 4, 5, 6, 11, 12 (E02–E06)
+
+All in [test_attachments.py](../tests/test_attachments.py). Inspection assertions
+cover the PDF text layer only; image documents are asserted to be *uncertain*, not
+inspected.
+
+- `test_fixture_documents_are_listed_and_downloadable` — **1 case.** `GET /fixtures`
+  lists every sample document with type/size; each download matches; downloads
+  require authentication; unknown IDs are 404.
+- `test_uploaded_pdf_is_inspected_with_page_reference_and_supports_execution` —
+  **1 case.** A two-page matching PDF uploaded to a `received` case is sanitized
+  (`../My Bill (Aug).PDF` → `My_Bill__Aug_.PDF`), typed from bytes, inspected with
+  name/address and `page: 2`, bound as evidence, audited without extracted values,
+  retrievable byte-for-byte with `private, no-store`, and processed to
+  `awaiting_approval`; approval and address execution succeed.
+- `test_unresolved_document_blocks_and_corrected_upload_resumes` — **5 cases:**
+  conflicting address, wrong name, scanned (no text layer), readable without labeled
+  fields, and PNG image. Each processes to `awaiting_information` with the expected
+  finding and the inspection reason inside the message; approval fails. A later
+  matching upload does not change the case until a reply binds it, which supersedes
+  version 1, keeps both attachment references, and allows approval/execution.
+- `test_embedded_document_instructions_only_yield_labeled_fields` — **1 case.** A
+  matching PDF containing instruction text is certain, its inspection carries no
+  instruction text, execution still needs approval, and the other broker stays denied.
+- `test_upload_validation_rejects_wrong_type_size_and_state` — **1 case.** Uses a
+  1500-byte limit app: plain text is 415, a PNG-magic body is accepted as `image/png`
+  regardless of filename, empty is 422, oversized is 413, a broken PDF is stored
+  with an unreadable reason, an unknown case is 404, and a completed case is 409.
+- `test_attachments_are_isolated_by_workspace_and_case` — **1 case.** Another guest
+  cannot read, download, or upload to the case (404; missing token 401), and neither
+  another guest's case nor a sibling case in the same workspace can bind the
+  attachment or an unknown evidence name as evidence (404, version unchanged).
+- `test_attachment_and_binding_survive_restart` — **1 case.** After app recreation
+  over SQLite the attachment bytes and the `received` case's evidence binding remain
+  and processing succeeds.
+
 ### Persistence, concurrency, and failure recovery — criteria 8, 9, 10
 
 - `test_paused_case_approval_and_receipt_survive_restart` — **1 case.** Recreates
-  application instances against a temporary SQLite file at awaiting-approval,
-  approved, and completed stages. The token remains usable and execution replay
-  preserves the receipt/revision. This is app recreation, not a killed worker or
-  PostgreSQL server restart; awaiting-information and LangGraph are not exercised.
+  application instances against a temporary SQLite file at received, approved, and
+  completed stages: the unprocessed intake is processed by a second instance, the
+  token remains usable, and execution replay preserves the receipt/revision. This
+  is app recreation, not a killed worker or PostgreSQL server restart;
+  awaiting-information and LangGraph are not exercised.
 - `test_failure_between_policy_write_and_audit_rolls_back` — **1 case.** Injects an
   exception at the update-audit call after the policy flush. The API fails, policy
   values and approval state remain intact, no confirmation appears, and retry
@@ -101,19 +160,26 @@ the commands below. Extend an existing scenario when it already owns the behavio
 
 [conftest.py](../tests/conftest.py) provides `app`, `client`, `guest`, `contact`, and
 `address`. Each test gets a fresh guest. SQLite uses a temporary file by default.
+Tests create their own tables through the bootstrap `create_all`; a pre-existing
+test database created before `cases.requested_changes` existed must be recreated.
 `TEST_DATABASE_URL` selects a dedicated PostgreSQL database for the shared API
 suite; the explicit restart test always uses SQLite. PostgreSQL tests leave
 synthetic rows, so never point this variable at production/shared business data.
 
-[fixtures.py](../src/policy_update/fixtures.py) provides four evidence dictionaries
-and four sample requests. `unreadable` sets both `readable` and `certain` to false;
-there is no separate readable-but-uncertain fixture. Source page 1 is fixture
-metadata, not proof of page extraction. Fixture consistency does not establish
-document authenticity.
+[fixtures.py](../src/policy_update/fixtures.py) provides four evidence dictionaries,
+four sample requests, and seven sample documents in `src/policy_update/assets`
+(regenerate with `scripts/make_evidence_assets.py`; the PDF writer is dependency-free
+and the PNG uses Pillow, a dev dependency). `unreadable` sets both `readable` and
+`certain` to false; the readable-but-uncertain case is covered by the
+`missing-fields-pdf` document. Fixture source page 1 is metadata; attachment page
+references come from actual `pypdf` text extraction. Neither establishes document
+authenticity.
 
 [scripts/demo.py](../scripts/demo.py) uses a running local server to exercise
 contact-only, missing evidence/correction, and conflicting evidence/correction.
-Each scenario approves through the API and checks duplicate execution. This is a
+Each scenario submits intake, processes it, approves through the API, and checks
+duplicate execution; a fourth scenario uploads a conflicting PDF, then a corrected
+PDF bound by a reply. This is a
 manual smoke companion, not pytest, browser automation, or an autonomous agent.
 It creates synthetic records and performs simulated approvals/updates.
 
@@ -125,6 +191,8 @@ Run from the repository root:
 uv sync --locked
 uv run pytest --collect-only -q
 uv run pytest -q --tb=short
+uv run pytest -q --tb=short -k 'intake or processing'
+uv run pytest -q --tb=short tests/test_attachments.py
 uv run pytest -q --tb=short -k 'evidence or contact or policy'
 uv run pytest -q --tb=short -k 'approval or stale or rejection'
 uv run pytest -q --tb=short -k 'guest or broker or assignment or authentication'
@@ -167,12 +235,16 @@ not been selected or installed yet.
 
 ### Existing backend gaps
 
-- [ ] Dedicated readable-but-uncertain and missing extracted-field cases; broader
-  normalization examples that must remain conflicting rather than match loosely.
+- [ ] Broader normalization examples that must remain conflicting rather than match
+  loosely; PDFs with multiple labeled names/addresses; JPEG uploads; encrypted PDFs;
+  a `MAX_INSPECTED_PAGES` overflow.
 - [ ] Explicit combined address/email/phone execution and contact-field boundary
   cases when those paths change; the suite does not enumerate every combination.
 - [ ] Awaiting-information app restart and persisted replies/evidence history;
   reply with unchanged evidence and explicit evidence removal after approval.
+- [ ] Concurrent `/process` calls on one received case (currently protected by the
+  case row lock, case revision, and the unique proposal version, exercised only
+  sequentially); processing after a mid-flight assignment change.
 - [ ] Revocation before approval and after successful execution/replay; evidence
   snapshot changes before approval/execution; all terminal edit/reply paths.
 - [ ] Controlled interleavings for competing edits/approvals/replies and different
@@ -182,11 +254,12 @@ not been selected or installed yet.
 
 ### Features not yet implemented
 
-- [ ] E02–E06: real PDF/image parsing, source fidelity, private attachment ownership,
-  type/size validation, unreadable/conflicting uploads, and corrected documents.
-- [ ] B13/A01–A08: intake/job separation, typed tools and permission enforcement,
-  tool budgets, genuine selection, human interrupts, checkpoint recovery, temporary
-  failure retry, and adversarial email/document inputs.
+- [ ] E04 image path: OCR/model inspection of PNG/JPEG documents once A01 exists;
+  today images are only stored and reported uncertain.
+- [ ] A01–A08: durable processing jobs and worker retry, typed tools and permission
+  enforcement, tool budgets, genuine selection, human interrupts, checkpoint
+  recovery, and adversarial email/document inputs. Intake/processing separation
+  itself is covered above (B13).
 - [ ] U01–U07: browser session isolation, actual review/approval flows, stale-state
   feedback, draft labeling, accessible interactions, and visual regression checks.
 - [ ] V05–V08: migrations with retained records, guest expiry/limits/cleanup,

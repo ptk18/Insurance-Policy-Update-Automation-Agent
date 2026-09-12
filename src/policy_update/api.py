@@ -2,9 +2,9 @@ import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -13,7 +13,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from policy_update import service
 from policy_update.database import initialize_database, make_database
-from policy_update.fixtures import BROKERS, EVIDENCE, SAMPLES
+from policy_update.fixtures import BROKERS, DOCUMENTS, EVIDENCE, SAMPLES, document_bytes
 from policy_update.models import Case, Workspace
 from policy_update.schemas import BrokerId, Intake, ProposalEdit, Rejection, Reply, VersionAction
 
@@ -46,9 +46,24 @@ def workspace_dependency(
 Guest = Annotated[Workspace, Depends(workspace_dependency)]
 
 
-def create_app(database_url: str | None = None) -> FastAPI:
+def file_response(content: bytes, content_type: str, filename: str) -> Response:
+    return Response(
+        content,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def create_app(database_url: str | None = None, max_attachment_bytes: int | None = None) -> FastAPI:
     engine, sessions = make_database(
         database_url or os.environ.get("DATABASE_URL", "sqlite:///./policy_demo.db")
+    )
+    attachment_limit = max_attachment_bytes or int(
+        os.environ.get("MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024))
     )
 
     @asynccontextmanager
@@ -103,7 +118,30 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.get("/fixtures")
     def fixtures(_guest: Guest):
-        return {"brokers": BROKERS, "evidence": EVIDENCE, "samples": SAMPLES}
+        documents = [
+            {
+                "id": document_id,
+                **metadata,
+                "size": len(document_bytes(document_id)),
+                "download": f"/fixtures/documents/{document_id}",
+            }
+            for document_id, metadata in DOCUMENTS.items()
+        ]
+        return {
+            "brokers": BROKERS,
+            "evidence": EVIDENCE,
+            "documents": documents,
+            "samples": SAMPLES,
+        }
+
+    @app.get("/fixtures/documents/{document_id}")
+    def fixture_document(document_id: str, _guest: Guest):
+        if document_id not in DOCUMENTS:
+            raise HTTPException(404, "Sample document not found")
+        metadata = DOCUMENTS[document_id]
+        return file_response(
+            document_bytes(document_id), metadata["content_type"], metadata["filename"]
+        )
 
     @app.get("/policies/{number}")
     def policy(number: str, broker_id: BrokerId, session: Db, guest: Guest):
@@ -111,8 +149,36 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/cases", status_code=201)
     def intake(data: Intake, session: Db, guest: Guest):
+        # Persist only. Processing runs in its own transaction via /cases/{id}/process.
         case = service.create_case(session, guest.id, data)
         return service.case_view(session, case)
+
+    @app.post("/cases/{case_id}/process")
+    def process(case_id: str, session: Db, guest: Guest):
+        case = service.get_case(session, guest.id, case_id)
+        service.process_case(session, case)
+        return service.case_view(session, case)
+
+    @app.post("/cases/{case_id}/attachments", status_code=201)
+    def upload(case_id: str, file: Annotated[UploadFile, File()], session: Db, guest: Guest):
+        case = service.get_case(session, guest.id, case_id)
+        # Read at most one byte past the limit so an oversized body is never buffered.
+        content = file.file.read(attachment_limit + 1)
+        attachment = service.store_attachment(
+            session, case, file.filename, content, attachment_limit
+        )
+        return service.attachment_view(attachment)
+
+    @app.get("/cases/{case_id}/attachments/{attachment_id}")
+    def attachment_detail(case_id: str, attachment_id: str, session: Db, guest: Guest):
+        case = service.get_case(session, guest.id, case_id)
+        return service.attachment_view(service.get_attachment(session, case, attachment_id))
+
+    @app.get("/cases/{case_id}/attachments/{attachment_id}/content")
+    def attachment_content(case_id: str, attachment_id: str, session: Db, guest: Guest):
+        case = service.get_case(session, guest.id, case_id)
+        attachment = service.get_attachment(session, case, attachment_id)
+        return file_response(attachment.content, attachment.content_type, attachment.filename)
 
     @app.get("/cases")
     def cases(session: Db, guest: Guest):

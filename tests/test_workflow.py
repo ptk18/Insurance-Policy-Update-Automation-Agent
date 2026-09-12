@@ -4,24 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from helpers import action, policy, submit
 from policy_update.api import create_app
 from policy_update.models import Assignment, AuditEvent, Case, Execution, Policy
-
-
-def submit(client, guest, payload):
-    response = client.post("/cases", headers=guest, json=payload)
-    assert response.status_code == 201, response.text
-    return response.json()
-
-
-def action(client, guest, case, name, version=1):
-    return client.post(f"/cases/{case['id']}/{name}", headers=guest, json={"version": version})
-
-
-def policy(client, guest):
-    response = client.get("/policies/DEMO-1001?broker_id=broker-alex", headers=guest)
-    assert response.status_code == 200
-    return response.json()
 
 
 def test_contact_approval_execution_and_retry(client, guest, contact):
@@ -45,6 +30,87 @@ def test_contact_approval_execution_and_retry(client, guest, contact):
     assert len(applied) == 1
     assert applied[0]["details"]["before"] == {"email": "sam@example.com"}
     assert applied[0]["proposal_version"] == 1
+
+
+def test_intake_is_persisted_before_processing(client, guest, contact):
+    received = client.post("/cases", headers=guest, json=contact).json()
+    assert received["status"] == "received"
+    assert received["current_version"] == 0
+    assert received["proposals"] == []
+    assert received["requested_changes"] == contact["changes"]
+    assert [event["action"] for event in received["timeline"]] == ["case_created"]
+    assert client.get("/cases", headers=guest).json()[0]["status"] == "received"
+    # Nothing version-bound can run against an unprocessed case.
+    for name, data in [
+        ("approve", {"version": 1}),
+        ("execute", {"version": 1}),
+        ("reject", {"version": 1, "reason": "Too early"}),
+        ("replies", {"expected_version": 1, "text": "Too early"}),
+    ]:
+        response = client.post(f"/cases/{received['id']}/{name}", headers=guest, json=data)
+        assert response.status_code == 409, name
+    assert (
+        client.put(
+            f"/cases/{received['id']}/proposal",
+            headers=guest,
+            json={"expected_version": 1, "changes": contact["changes"]},
+        ).status_code
+        == 409
+    )
+    assert client.get(f"/cases/{received['id']}", headers=guest).json()["status"] == "received"
+    processed = client.post(f"/cases/{received['id']}/process", headers=guest)
+    assert processed.status_code == 200
+    assert processed.json()["status"] == "awaiting_approval"
+    assert processed.json()["proposals"][0]["changes"] == contact["changes"]
+    assert [event["action"] for event in processed.json()["timeline"]] == [
+        "case_created",
+        "proposal_validated",
+    ]
+    assert client.post(f"/cases/{received['id']}/process", headers=guest).status_code == 409
+    assert client.get(f"/cases/{received['id']}", headers=guest).json()["current_version"] == 1
+
+
+def test_processing_failure_keeps_intake_retryable(app, guest, contact, monkeypatch):
+    from policy_update import service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        received = client.post("/cases", headers=guest, json=contact).json()
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                service,
+                "validate_changes",
+                lambda *_: (_ for _ in ()).throw(RuntimeError("Simulated processing crash")),
+            )
+            assert client.post(f"/cases/{received['id']}/process", headers=guest).status_code == 500
+        detail = client.get(f"/cases/{received['id']}", headers=guest).json()
+        assert detail["status"] == "received"
+        assert detail["proposals"] == []
+        assert detail["requested_changes"] == contact["changes"]
+        retried = client.post(f"/cases/{received['id']}/process", headers=guest)
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "awaiting_approval"
+        assert retried.json()["current_version"] == 1
+
+
+def test_intake_without_changes_pauses_until_reviewer_supplies_them(client, guest, contact):
+    case = submit(client, guest, {key: value for key, value in contact.items() if key != "changes"})
+    assert case["status"] == "awaiting_information"
+    assert case["requested_changes"] is None
+    assert [item["code"] for item in case["proposals"][0]["findings"]] == ["missing_changes"]
+    assert case["proposals"][0]["changes"] == {}
+    assert case["follow_up_draft"]
+    assert action(client, guest, case, "approve").status_code == 409
+    response = client.put(
+        f"/cases/{case['id']}/proposal",
+        headers=guest,
+        json={"expected_version": 1, "changes": contact["changes"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "awaiting_approval"
+    assert response.json()["current_version"] == 2
+    assert action(client, guest, case, "approve", 2).status_code == 200
+    assert action(client, guest, case, "execute", 2).status_code == 200
+    assert policy(client, guest)["email"] == "sam.updated@example.com"
 
 
 @pytest.mark.parametrize(
@@ -113,6 +179,10 @@ def test_missing_or_unknown_policy_requires_explicit_reply(client, guest, contac
 
 
 def test_unassigned_broker_cannot_inspect_approve_or_execute(client, guest, contact):
+    received = client.post("/cases", headers=guest, json={**contact, "broker_id": "broker-jordan"})
+    assert received.status_code == 201
+    assert received.json()["status"] == "received"
+    assert "holder_name" not in received.text
     case = submit(client, guest, {**contact, "broker_id": "broker-jordan"})
     assert case["status"] == "blocked"
     assert case["proposals"][0]["before"] == {}
@@ -199,7 +269,7 @@ def test_guest_isolation_for_every_case_endpoint(client, guest, contact):
     other = {"Authorization": f"Bearer {token}"}
     assert client.get("/cases", headers=other).json() == []
     assert client.get(f"/cases/{case['id']}", headers=other).status_code == 404
-    for name in ["approve", "execute", "reject"]:
+    for name in ["approve", "execute", "reject", "process"]:
         data = {"version": 1}
         if name == "reject":
             data["reason"] = "Not my case"
@@ -283,10 +353,12 @@ def test_paused_case_approval_and_receipt_survive_restart(tmp_path, contact):
     with TestClient(create_app(url)) as first:
         token = first.post("/workspaces").json()["token"]
         guest = {"Authorization": f"Bearer {token}"}
-        case = submit(first, guest, contact)
+        case = first.post("/cases", headers=guest, json=contact).json()
+        assert case["status"] == "received"
     with TestClient(create_app(url)) as second:
-        detail = second.get(f"/cases/{case['id']}", headers=guest)
-        assert detail.json()["status"] == "awaiting_approval"
+        assert second.get(f"/cases/{case['id']}", headers=guest).json()["status"] == "received"
+        processed = second.post(f"/cases/{case['id']}/process", headers=guest)
+        assert processed.json()["status"] == "awaiting_approval"
         assert action(second, guest, case, "approve").status_code == 200
     with TestClient(create_app(url)) as third:
         result = action(third, guest, case, "execute")

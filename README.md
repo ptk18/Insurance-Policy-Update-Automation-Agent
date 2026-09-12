@@ -10,14 +10,31 @@ See the [delivery checklist](_docs/process.md),
 
 The first backend slice is runnable: FastAPI, Pydantic, SQLAlchemy, isolated guest
 workspaces, seeded health policies and broker assignments, structured case intake,
-evidence validation, clarification drafts, replies, proposal edits, approval,
-rejection, simulated policy updates, and an audit timeline.
+a separate processing step, PDF/image attachments with PDF inspection, evidence
+validation, clarification drafts, replies, proposal edits, approval, rejection,
+simulated policy updates, and an audit timeline.
 
-**The LLM agent, LangGraph checkpoints/jobs, PDF/image uploads and extraction,
-Next.js dashboard, and deployment are still pending.** Email text is stored as
-untrusted evidence; it is not parsed yet. Callers supply the explicit policy number
-and structured proposed changes. Address checks currently use named, server-owned
-fictional evidence fixtures, not actual documents. Drafts use templates.
+Intake and processing are separate operations. `POST /cases` only stores the
+request (`received`); `POST /cases/{id}/process` runs authorization, validation,
+and proposal preparation in its own transaction, so a failed processing request
+leaves the stored intake ready to process again. Processing is currently a
+synchronous rule-based stand-in for the planned worker, not an agent run.
+
+Attachments (PDF, PNG, JPEG; type detected from the bytes, 5 MiB default limit via
+`MAX_ATTACHMENT_BYTES`) are stored in the database, scoped to the guest workspace
+and case, and served only through authenticated case endpoints. PDF text layers are
+inspected deterministically for labeled `Account holder:` and `Service address:`
+lines, recording the page they came from and the reasons a document is unreadable
+or uncertain. Any other document text is ignored. Image documents are stored but
+reported uncertain: there is no OCR, and image inspection waits for the model
+adapter. Seven synthetic sample documents are downloadable from `GET /fixtures`.
+
+**The LLM agent, LangGraph checkpoints/jobs, image inspection, Next.js dashboard,
+and deployment are still pending.** Email text is stored as untrusted evidence; it
+is not parsed yet. Callers supply the explicit policy number and, optionally,
+structured proposed changes; without them processing pauses with a
+`missing_changes` finding until a reviewer edits the proposal. Address evidence is
+either a named server-owned fixture or an uploaded document. Drafts use templates.
 
 ## Run locally
 
@@ -29,30 +46,43 @@ uv run uvicorn policy_update.api:create_app --factory --reload
 ```
 
 Open <http://127.0.0.1:8000/docs> for the interactive review API. SQLite persists to
-`policy_demo.db` by default. Startup creates missing tables; it does not reset data.
+`policy_demo.db` by default. Startup creates missing tables (including the new
+`attachments` table); it does not reset data and does not add columns to existing
+tables. A `policy_demo.db` created before the `cases.requested_changes` column
+existed must be deleted or replaced with a fresh `DATABASE_URL`; versioned
+migrations are still pending.
 
-In another terminal, run all three scenarios (contact-only, missing evidence with
-a reply, and conflicting evidence with a corrected reply):
+In another terminal, run all four scenarios (contact-only, missing evidence with
+a reply, conflicting evidence with a corrected reply, and a conflicting uploaded PDF
+corrected by a second upload):
 
 ```sh
 uv run python scripts/demo.py
 ```
 
-The script creates a new isolated guest, performs simulated reviewer approvals,
-executes each update, and checks duplicate execution. It keeps the guest token in
-memory and never prints it. This is an API smoke demo, not an agent run.
+The script creates a new isolated guest, submits and processes each intake,
+performs simulated reviewer approvals, executes each update, and checks duplicate
+execution. It keeps the guest token in memory and never prints it. This is an API
+smoke demo, not an agent run.
 
 For manual review through `/docs`:
 
 1. Call `POST /workspaces`, then enter its returned token in **Authorize**. Keep
    this token to return to the same workspace after a restart.
 2. Call `GET /fixtures` and copy a sample's `intake` object into `POST /cases`.
-3. Inspect the returned case's before/after values, findings, and evidence source.
-4. For missing/conflicting evidence, call `POST /cases/{id}/replies` with
-   `{"expected_version": 1, "text": "Corrected evidence", "evidence_id": "matching-address"}`.
-5. Approve the case's `current_version` with `POST /cases/{id}/approve`, then call
+   The response is the stored `received` case with no proposal yet.
+3. Optionally download a sample document from `GET /fixtures/documents/{id}` and
+   upload it with `POST /cases/{id}/attachments`. An upload to a `received` case
+   becomes its evidence; the response shows the inspection result and page.
+4. Call `POST /cases/{id}/process`, then inspect the returned case's before/after
+   values, findings, and evidence source. Processing a case twice returns 409.
+5. For missing/conflicting evidence, call `POST /cases/{id}/replies` with
+   `{"expected_version": 1, "text": "Corrected evidence", "evidence_id": ...}` where
+   `evidence_id` is a fixture name such as `matching-address` or the ID of an
+   attachment uploaded to this case.
+6. Approve the case's `current_version` with `POST /cases/{id}/approve`, then call
    `POST /cases/{id}/execute` with that same `{"version": ...}` body.
-6. Inspect `GET /cases/{id}` for the confirmation draft and timeline. Execute the
+7. Inspect `GET /cases/{id}` for the confirmation draft and timeline. Execute the
    same version again to retrieve the original receipt.
 
 The reviewer token identifies the guest workspace. Broker selection represents
@@ -83,10 +113,14 @@ SQLite storage. CI runs the suite on SQLite and PostgreSQL 17.
   expiry, resource limits, and guest cleanup.
 - The backend checks the case's fixed broker assignment before returning policy
   values, preparing a proposal, approving it, or executing it. Request text cannot
-  alter that identity.
+  alter that identity. A stored but unprocessed case exposes only what the caller
+  submitted, and no version-bound action can run on it until it is processed.
 - Only mailing address, email, and phone changes are accepted. Any unresolved
   field or required evidence pauses the whole request. Evidence conflicts cannot
   be waived by the approval endpoint.
+- Attachments belong to one case in one workspace; other workspaces receive 404.
+  A reply can only bind evidence from the same case. Document text is evidence:
+  inspection reads labeled fields only, so instructions inside a PDF change nothing.
 - Every edit or reply creates a new proposal version. Older versions and their
   historical approvals remain visible but cannot execute. Stale browser actions
   are rejected using the expected version.
@@ -96,8 +130,9 @@ SQLite storage. CI runs the suite on SQLite and PostgreSQL 17.
   audit outcome commit in one transaction. PostgreSQL row locks and optimistic
   revisions protect concurrent operations. A repeated successful execution returns
   its saved result; a concurrent conflict can be retried manually.
-- Audit records retain synthetic before/after values. Application code does not
-  log request bodies, bearer tokens, or evidence contents. No email is sent.
+- Audit records retain synthetic before/after values and attachment metadata
+  (type, size, readability), not extracted document values. Application code does
+  not log request bodies, bearer tokens, or document contents. No email is sent.
 
 The future agent's allowlist must expose only the permitted processing tools from
 the plan. It must not expose reviewer approval operations or receive a guest's
@@ -106,11 +141,11 @@ made for the unfinished LLM integration.
 
 ## Next implementation steps
 
-1. Add private attachment storage and PDF/image inspection with source references.
-2. Add the actual LangGraph tool-selection loop, a hosted model adapter, durable
-   checkpoints, processing jobs, bounded tool calls, and manual retry handling.
-3. Build the Next.js review dashboard around these endpoints.
-4. Add database migrations, guest lifecycle limits, containers, and deployment;
+1. Add the actual LangGraph tool-selection loop, a hosted model adapter (including
+   image document inspection), durable checkpoints, processing jobs, bounded tool
+   calls, and manual retry handling.
+2. Build the Next.js review dashboard around these endpoints.
+3. Add database migrations, guest lifecycle limits, containers, and deployment;
    run the complete acceptance scenarios in the hosted environment.
 
 Case chat and real inbox integration remain later phases.

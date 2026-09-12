@@ -65,33 +65,50 @@ Evidence: [API](../src/policy_update/api.py),
   through the API. No outbound email.
 - [x] B12 — Support persistent SQLite and PostgreSQL storage with row locking and
   optimistic revisions. Bootstrap missing tables without resetting records.
-- [ ] B13 — Separate intake persistence from processing. **Partial:** domain
-  functions exist, but `create_case` immediately invokes `prepare_proposal` in the
-  HTTP transaction and `Intake` still requires caller-supplied `changes`.
+- [x] B13 — Separate intake persistence from processing. `POST /cases` only
+  persists the case (`received`, optional `requested_changes`); `POST
+  /cases/{id}/process` runs `service.process_case` in its own transaction and is
+  refused once a case has left `received`. Version-bound actions on an unprocessed
+  case fail with 409. Processing is still a synchronous rule-based stand-in for the
+  planned worker: no job record, queue, or LangGraph checkpoint exists (A05/A06).
 
 ## 2. Attachments and evidence
 
-Current evidence source: [fixtures.py](../src/policy_update/fixtures.py).
-Fixture IDs and page 1 references do not represent uploaded files or extraction.
+Evidence sources: [fixtures.py](../src/policy_update/fixtures.py) (named fixture
+dictionaries; their page 1 reference is metadata, not extraction) and uploaded
+attachments inspected by [documents.py](../src/policy_update/documents.py).
 
 - [x] E01 — Seed example requests and matching/conflicting/wrong-name/unreadable
   evidence dictionaries for backend scenarios.
-- [ ] E02 — Create fictional PDF/image proof-of-address assets and sample download
-  metadata. Select private storage and persist attachment ownership by case/guest.
-- [ ] E03 — Add PDF/image upload and authorized retrieval, file validation, size
-  limits, and attachment isolation. Prevent access by another workspace.
-- [ ] E04 — Implement document inspection with extracted name/address, uncertainty,
-  and source references to actual documents/pages. Treat contents as untrusted.
-- [ ] E05 — Connect extracted evidence to validation, same-case corrected uploads,
-  and version invalidation. Preserve earlier evidence references for review.
-- [ ] E06 — Test actual missing/unreadable/conflicting/corrected documents and
-  unauthorized attachment access; do not reuse fixture success as extraction proof.
+- [x] E02 — Seven synthetic PDF/PNG assets in `src/policy_update/assets` (generated
+  by `scripts/make_evidence_assets.py`), listed with size/type/expected outcome by
+  `GET /fixtures` and served by `GET /fixtures/documents/{id}`. Storage choice:
+  attachment bytes are stored in the `attachments` table (deferred column) scoped by
+  workspace and case; object storage is a later swap of that column only.
+- [x] E03 — `POST /cases/{id}/attachments` (multipart, type sniffed from bytes: PDF,
+  PNG, JPEG; `MAX_ATTACHMENT_BYTES`, default 5 MiB; sanitized filename; editable
+  cases only) and authorized `GET .../attachments/{id}` and `.../content`. Other
+  workspaces get 404; content responses are `private, no-store`.
+- [ ] E04 — **Partial:** PDF text layers are inspected deterministically for labeled
+  `Account holder`/`Service address` lines with page references, unreadable and
+  uncertain reasons, and no effect from other document text. Image documents are
+  stored and validated but inspection reports them uncertain until the hosted model
+  adapter (A01) exists; no OCR runs.
+- [x] E05 — `evidence_id` on intake replies accepts a fixture name or a same-case
+  attachment ID; an upload to a `received` case binds automatically, later uploads
+  bind through a reply, which creates a new version and invalidates approval. Every
+  proposal keeps its own evidence snapshot with the attachment reference.
+- [x] E06 — [test_attachments.py](../tests/test_attachments.py) covers matching,
+  conflicting, wrong-name, scanned, missing-field, image, and instruction-bearing
+  documents, corrected uploads, type/size/state rejection, cross-workspace and
+  cross-case isolation, and restart. Image inspection and real OCR/model extraction
+  are not proven; document authenticity is not checked.
 
 ## 3. Bounded agent and durable processing
 
-Depends on B13; contact-only tool-loop work can start while attachments are built.
-The full address path depends on E02–E05. No LangGraph/model dependencies or agent
-worker exist in the current tree.
+B13 and E02–E05 are in place, so both the contact-only and PDF address paths can
+attach to `process_case`. Image inspection needs A01. No LangGraph/model
+dependencies or agent worker exist in the current tree.
 
 - [ ] A01 — Select one hosted model/provider and implement its adapter, structured
   request extraction, and handling of unsupported or ambiguous English requests.
@@ -106,8 +123,9 @@ worker exist in the current tree.
 - [ ] A05 — Persist LangGraph checkpoints and processing jobs independently of the
   browser request, including recovery after a worker restart.
 - [ ] A06 — Persist temporary failures and expose manual processing/execution retry.
-  **Partial:** execution retries already preserve approval and idempotency; there
-  is no worker retry API or durable failed/retryable job state.
+  **Partial:** execution retries already preserve approval and idempotency, and a
+  failed `/process` request leaves the intake `received` so it can be resubmitted;
+  there is no worker retry API or durable failed/retryable job state.
 - [ ] A07 — Record tool calls, outcomes, and concise decision summaries. **Partial:**
   domain audit events exist; model tool execution history does not.
 - [ ] A08 — Test tool boundaries, malicious email/document instructions, model
@@ -140,14 +158,16 @@ Evidence: [tests](../tests/test_workflow.py),
 [CI configuration](../.github/workflows/ci.yml), and
 [demo script](../scripts/demo.py).
 
-- [x] V01 — Add backend regression tests: 19 test functions / 26 parameterized
-  cases. See the testing guide for exact assertions and uncovered branches.
+- [x] V01 — Add backend regression tests: 29 test functions / 40 parameterized
+  cases across two modules. See the testing guide for assertions and gaps.
 - [x] V02 — Verify the backend suite locally on SQLite and PostgreSQL; verify lint
-  and formatting. Prior build session: 26 passed on each database.
+  and formatting. E02–E06 session (2026-09-12): 40 passed on SQLite and on a
+  dedicated local PostgreSQL test database; `ruff check`/`ruff format --check` clean.
 - [x] V03 — Configure CI to run lint/format and tests on SQLite/PostgreSQL 17.
   Hosted CI execution is not yet verified.
 - [x] V04 — Run a local API smoke script for contact-only, missing evidence/resume,
-  and conflict/correction scenarios, each with duplicate execution checks.
+  conflict/correction, and uploaded-PDF conflict/correction scenarios, with
+  duplicate execution checks on the fixture scenarios (rerun 2026-09-12).
 - [ ] V05 — Add versioned migrations and verify upgrades with retained demo data.
 - [ ] V06 — Add guest expiry/cleanup, resource limits, private storage configuration,
   and safe operational logging appropriate to the public demo.
@@ -165,29 +185,32 @@ Numbers refer to the twelve criteria in [plan.md](plan.md). These are readiness
 notes, not an assertion that the full deployed product passes acceptance.
 
 1. **Partial:** isolated guests and samples via API (B02/E01); guest UI absent (U02).
-2. **Partial:** fixture-backed proposals work (B06/B08); model tool selection and
-   actual document evidence absent (E04/A01–A04).
+2. **Partial:** fixture- and PDF-backed proposals work (B06/B08/E04); model tool
+   selection and image inspection are absent (A01–A04).
 3. **Backend covered:** contact-only proceeds without attachment (B04/B09/V01);
    demonstrate it through the agent and UI (A03/U02–U04).
-4. **Backend covered with fixtures:** missing number/evidence pauses and drafts
-   clarification (B05/B06); extraction and agent-driven follow-up remain (E04/A02).
-5. **Backend covered with fixtures:** conflict blocks and a corrected reply creates
-   a valid new version (B07/B08); uploaded correction/resume remains (E05/U05).
-6. **API covered:** unassigned/revoked access is denied (B05/V01); prove future
-   agent tools and attachment paths preserve the boundary (E03/A02/A08).
+4. **Backend covered:** missing number/evidence, scanned, and unlabeled PDFs pause
+   and draft clarification (B05/B06/E04); agent-driven follow-up remains (A02).
+5. **Backend covered:** conflicting fixtures and PDFs block; a corrected reply or
+   corrected upload bound by a reply creates a valid new version (B07/B08/E05);
+   the dashboard flow remains (U05).
+6. **API covered:** unassigned/revoked access and cross-workspace attachment access
+   are denied (B05/E03/V01); prove future agent tools preserve the boundary (A02/A08).
 7. **Partial:** before/after data and exact-version approval exist (B08/B09);
    reviewer dashboard absent (U03/U04).
 8. **Partial:** execution, saved values/audit, and confirmation template exist
    (B10/B11); model execution and dashboard presentation absent (A02/U06).
 9. **API covered:** unapproved/stale execution is rejected (B09/B10/V01);
    verify through agent and UI integrations (A08/U04).
-10. **Partial:** app recreation over SQLite retains awaiting-approval/approved cases
-    and receipts, and duplicate execution is covered. Awaiting-information restart,
-    LangGraph checkpoints, and worker/host restart recovery remain (A05/V08).
-11. **Cases/policies covered:** API tenant isolation exists (B02/V01);
-    attachment isolation and browser session separation remain (E03/E06/U02).
-12. **Partial:** raw request text and forged approval input cannot bypass the
-    current API. No LLM or uploaded-document injection evaluation exists (A08/E06).
+10. **Partial:** app recreation over SQLite retains received/awaiting-approval/
+    approved cases and receipts, and duplicate execution is covered. Awaiting-
+    information restart, LangGraph checkpoints, and worker/host restart recovery
+    remain (A05/V08).
+11. **Cases/policies/attachments covered:** API tenant isolation exists
+    (B02/E03/V01); browser session separation remains (U02).
+12. **Partial:** raw request text, forged approval input, and instruction text
+    inside an uploaded PDF cannot bypass the current API (E06). No LLM injection
+    evaluation exists (A08).
 
 ## Later phases
 
@@ -198,5 +221,7 @@ notes, not an assertion that the full deployed product passes acceptance.
   matching, access configuration, and outbound-message policy with separate tests.
   Real sending is outside the initial demo.
 
-Next work: B13 and E02–E04, followed by the contact-only agent path A01–A05.
-UI work can proceed against existing endpoints once U01 establishes its baseline.
+Next work: A01–A05 (model adapter including image inspection, typed tools,
+LangGraph loop, interrupts, durable jobs), which attach to `process_case` and the
+stored attachments without changing intake. UI work can proceed against existing
+endpoints once U01 establishes its baseline.

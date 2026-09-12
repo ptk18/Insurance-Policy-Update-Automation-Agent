@@ -25,7 +25,9 @@ def validate_changes(
     def issue(code, message):
         findings.append({"code": code, "message": message})
 
-    if not changes or set(changes) - ALLOWED_FIELDS:
+    if not changes:
+        issue("missing_changes", "Specify the requested mailing address, email, or phone changes.")
+    elif set(changes) - ALLOWED_FIELDS:
         issue("unsupported_fields", "Only mailing address, email, and phone changes are allowed.")
     for key, value in changes.items():
         if not isinstance(value, str) or not value.strip():
@@ -43,7 +45,15 @@ def validate_changes(
         if evidence is None:
             issue("missing_evidence", "Provide proof of address for the mailing address change.")
         elif not evidence.get("readable") or not evidence.get("certain"):
-            issue("uncertain_evidence", "Provide readable, unambiguous proof of address.")
+            issue(
+                "uncertain_evidence",
+                " ".join(
+                    [
+                        "Provide readable, unambiguous proof of address.",
+                        *evidence.get("reasons", []),
+                    ]
+                ),
+            )
         else:
             if policy and normalize(evidence["name"]) != normalize(policy.holder_name):
                 issue("name_conflict", "The evidence name does not match the policyholder.")

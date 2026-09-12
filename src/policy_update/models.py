@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -59,7 +59,9 @@ class Case(Base):
     original_request: Mapped[str]
     replies: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     evidence_id: Mapped[str | None]
-    status: Mapped[str] = mapped_column(default="processing")
+    # Structured stand-in for future request extraction; consumed when processing starts.
+    requested_changes: Mapped[dict[str, str] | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(default="received")
     current_version: Mapped[int] = mapped_column(default=0)
     follow_up: Mapped[str | None]
     confirmation: Mapped[str | None]
@@ -67,6 +69,23 @@ class Case(Base):
     revision: Mapped[int] = mapped_column(default=1)
 
     __mapper_args__ = {"version_id_col": revision}
+
+
+class Attachment(Base):
+    __tablename__ = "attachments"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(120))
+    content_type: Mapped[str] = mapped_column(String(40))
+    size: Mapped[int]
+    sha256: Mapped[str] = mapped_column(String(64))
+    # Private storage: bytes live in the database row, never on a public path.
+    # Moving to object storage later only changes this column, not ownership checks.
+    content: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
+    inspection: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[str] = mapped_column(default=now)
 
 
 class Proposal(Base):

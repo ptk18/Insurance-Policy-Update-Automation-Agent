@@ -1,0 +1,64 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Length 300 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+16 TL
+(DEMO UTILITY CO - FICTIONAL PROOF OF ADDRESS \(SYNTHETIC DATA\)) Tj T*
+() Tj T*
+(Page 1 of 2 - cover letter.) Tj T*
+(Your account details and service address are shown on page 2.) Tj T*
+(This document is synthetic demo data and does not describe a real person.) Tj T*
+ET
+endstream
+endobj
+3 0 obj
+<< /Type /Page /Parent 6 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 2 0 R >>
+endobj
+4 0 obj
+<< /Length 331 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+16 TL
+(DEMO UTILITY CO - FICTIONAL PROOF OF ADDRESS \(SYNTHETIC DATA\)) Tj T*
+(Statement date: 2026-08-01) Tj T*
+() Tj T*
+(Account holder: Sam Taylor) Tj T*
+(Service address: 42 Orchard Lane, Demo City, 10001) Tj T*
+() Tj T*
+(Electricity supply - August 2026) Tj T*
+(Amount due: 42.00 \(fictional\)) Tj T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 6 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+7 0 obj
+<< /Type /Catalog /Pages 6 0 R >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000079 00000 n 
+0000000430 00000 n 
+0000000556 00000 n 
+0000000938 00000 n 
+0000001064 00000 n 
+0000001127 00000 n 
+trailer
+<< /Size 8 /Root 7 0 R >>
+startxref
+1176
+%%EOF
