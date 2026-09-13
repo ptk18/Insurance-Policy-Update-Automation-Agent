@@ -6,6 +6,11 @@ export default defineConfig({
   workers: 1,
   timeout: 30000,
   expect: { timeout: 10000 },
+  projects: [
+    { name: "chromium", use: { browserName: "chromium" } },
+    { name: "firefox", use: { browserName: "firefox" } },
+    { name: "webkit", use: { browserName: "webkit" } },
+  ],
   use: {
     baseURL: "http://127.0.0.1:3001",
     viewport: { width: 1440, height: 1050 },

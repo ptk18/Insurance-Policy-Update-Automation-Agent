@@ -24,23 +24,22 @@ Build a synthetic-data health insurance policy update demo. Only policyholder
 mailing address, email, and phone updates are permitted. Prioritize one working
 core workflow before case chat or real inbox integration.
 
-The current implementation is a backend foundation with structured or free-text
-review inputs, server-owned evidence fixtures, PDF/image attachments with
-deterministic PDF text-layer inspection, and a text-only Gemini adapter
-(`GEMINI_API_KEY` loaded from `.env`) that extracts requested changes and pauses
-unsupported or ambiguous requests, typed case-scoped tools, and a bounded LangGraph
-loop in which the model selects tools, pauses on interrupts for replies and human
-approval, and resumes from persisted checkpoints. Processing routes only queue a
-durable job (`202`); a worker (embedded thread by default, or a separate
+The current implementation supports structured or free-text review inputs, server-owned
+evidence fixtures, PDF/image attachments with deterministic PDF text-layer inspection,
+and a text-only Gemini adapter (`GEMINI_API_KEY` loaded from `.env`) that extracts
+requested changes and pauses unsupported or ambiguous requests, typed case-scoped tools,
+and a bounded LangGraph loop in which the model selects tools, pauses on interrupts for
+replies and human approval, and resumes from persisted checkpoints. Processing routes
+only queue a durable job (`202`); a worker (embedded thread by default, or a separate
 `python -m policy_update.worker` process) claims it under a renewed lease, runs it
-outside any request, and sweeps stalled jobs back into the queue. Image/OCR
-inspection and deployment remain pending. The Next.js dashboard in `frontend/`
-connects through same-origin route handlers and an HttpOnly guest cookie. Check the
-code before describing a planned feature as implemented, and update the README when
-that status changes. Tests must pass `model=None`/`agent_model=None` or scripted
-fakes (`FakeModel`, `FakeChat`) to `create_app`; never call the hosted model from
-the suite. Tests run with `WORKER_MODE=external` and drive the worker themselves
-(`helpers.run`/`drain`); do not rely on a background thread for determinism.
+outside any request, and sweeps stalled jobs back into the queue. Image/OCR inspection
+and deployment remain pending. The Next.js dashboard in `frontend/` connects through
+same-origin route handlers and an HttpOnly guest cookie. Check the code before
+describing a planned feature as implemented, and update the README when that status
+changes. Tests must pass `model=None`/`agent_model=None` or scripted fakes (`FakeModel`,
+`FakeChat`) to `create_app`; never call the hosted model from the suite. Tests run with
+`WORKER_MODE=external` and drive the worker themselves (`helpers.run`/`drain`); do not
+rely on a background thread for determinism.
 
 Do not introduce real insurance records, outbound email, a vector database, model
 training, multi-agent architecture, or a separate planning service for this scope.
@@ -62,7 +61,11 @@ Keep illustrative business rules and synthetic measurements labeled as such.
 - `src/policy_update/service.py`: case lifecycle, authorization, proposal
   versioning, reviewer actions, execution, and audit operations.
 - `src/policy_update/models.py`: SQLAlchemy persistence models.
-- `src/policy_update/database.py`: database setup and session factory.
+- `src/policy_update/database.py`: database sessions and revision checks; `migrations/`
+  contains packaged Alembic revisions, `migrate.py` is the explicit upgrade command.
+- `src/policy_update/limits.py`: persistent budgets and guest expiry. `cleanup.py`
+  previews/deletes expired guests offline, including checkpoint threads.
+- `_docs/deployment.md`: Docker/Render setup, migration/cleanup, and hosted checks.
 - `src/policy_update/schemas.py`: strict Pydantic request contracts.
 - `src/policy_update/validation.py`: permitted fields and evidence/contact checks.
 - `src/policy_update/documents.py`: attachment type sniffing and labeled-field PDF
@@ -126,16 +129,17 @@ Keep routes thin and business controls in reusable domain operations. Future
 agent tools must reuse those controls rather than provide alternate write paths.
 Keep intake separate from processing as the agent integration is introduced.
 
-The planned LangGraph integration must let the LLM select from typed, bounded
-tools, with durable checkpoints, human approval interruption, and a tool-call
-budget. Never expose approval operations or reviewer credentials to the model.
-Do not present a fixed sequence of prompts or the current fixture workflow as a
-completed agent. Processing jobs must survive browser requests and support retry.
+The LangGraph integration must let the LLM select from typed, bounded tools, with
+durable checkpoints, human approval interruption, and a tool-call budget. Never expose
+approval operations or reviewer credentials to the model. Do not present a fixed
+sequence of prompts or the current fixture workflow as a completed agent. Processing
+jobs must survive browser requests and support retry.
 
-Support SQLite for local development and PostgreSQL for the deployed direction.
-Do not replace transactional or concurrency guarantees with process-local locks.
-Schema creation is currently bootstrap-only; add versioned migrations before
-evolving a deployed database with existing data.
+Support SQLite for local development and PostgreSQL for the deployed direction. Do not
+replace transactional or concurrency guarantees with process-local locks. Schema changes
+require a new packaged Alembic revision. Existing databases upgrade through the explicit
+migration command; deployed API/workers use SCHEMA_MODE=verify. Never migrate the user’s
+running database without an approved maintenance step.
 
 ## Commands and verification
 

@@ -1,7 +1,6 @@
 """Transactional domain operations. A caller must supply the authenticated workspace.
 
-Review operations are deliberately separate from execution. Future agent tools must
-not expose approve/reject or receive the guest's reviewer credential.
+Agent tools reuse these controls without exposing reviewer operations or credentials.
 """
 
 import hashlib
@@ -15,6 +14,7 @@ from sqlalchemy.orm import Session
 from policy_update.documents import inspect_document, safe_filename, sniff_content_type
 from policy_update.extraction import Extraction, ModelClient, ModelError, extract_request
 from policy_update.fixtures import EVIDENCE, evidence_snapshot
+from policy_update.limits import consume, require_active, reserve_run, setting
 from policy_update.models import (
     Assignment,
     Attachment,
@@ -42,6 +42,7 @@ def token_hash(token: str) -> str:
 
 
 def create_workspace(session: Session) -> tuple[Workspace, str]:
+    consume(session, "workspaces", setting("MAX_WORKSPACES", 2000))
     token = secrets.token_urlsafe(32)
     workspace = Workspace(token_hash=token_hash(token))
     session.add(workspace)
@@ -165,6 +166,7 @@ def store_attachment(
     session: Session, case: Case, filename: str | None, content: bytes, limit: int
 ) -> Attachment:
     require_editable(case)
+    require_active(session, case.workspace_id)
     if len(content) > limit:
         raise DomainError(413, f"Attachments are limited to {limit} bytes")
     if not content:
@@ -172,6 +174,13 @@ def store_attachment(
     content_type = sniff_content_type(content)
     if content_type is None:
         raise DomainError(415, "Only PDF, PNG, and JPEG attachments are accepted")
+    consume(session, f"files:{case.id}", setting("MAX_CASE_ATTACHMENTS", 10))
+    consume(
+        session,
+        f"bytes:{case.workspace_id}",
+        setting("MAX_WORKSPACE_ATTACHMENT_BYTES", 25 * 1024 * 1024),
+        len(content),
+    )
     attachment = Attachment(
         workspace_id=case.workspace_id,
         case_id=case.id,
@@ -222,6 +231,8 @@ def prepare_proposal(
 ) -> Proposal:
     """``notes`` are extra findings (for example unsupported or ambiguous wording found by
     request extraction) that pause the case alongside the domain validation."""
+    if case.current_version >= setting("MAX_CASE_VERSIONS", 50):
+        raise DomainError(429, "This demo case has reached its proposal version limit")
     require_editable(case)
     policy, error = policy_for_case(session, case)
     if error == "broker_denied" and case.current_version:
@@ -285,6 +296,8 @@ def create_case(session: Session, workspace_id: str, data: Intake) -> Case:
     """Persist intake only. Policy lookup, authorization, and validation happen in
     ``process_case`` so a stored request survives a processing failure and a future
     inbox adapter or worker can submit and process the same structure."""
+    require_active(session, workspace_id)
+    consume(session, f"cases:{workspace_id}", setting("MAX_WORKSPACE_CASES", 25))
     case = Case(
         workspace_id=workspace_id,
         broker_id=data.broker_id,
@@ -306,8 +319,7 @@ def create_case(session: Session, workspace_id: str, data: Intake) -> Case:
 
 
 def process_case(session: Session, case: Case, model: ModelClient | None = None) -> Proposal:
-    # Synchronous stand-in for the planned worker; the row lock taken by get_case plus
-    # the received-only guard keep concurrent processing single-shot.
+    # The worker holds the case lock; only received cases can create the first proposal.
     if case.status != "received":
         raise DomainError(409, "This case has already been processed")
     if case.requested_changes is not None or model is None:
@@ -438,6 +450,7 @@ def enqueue_job(session: Session, case: Case, action: str, retry: bool = False) 
     job.retryable = False
     job.last_error = None
     job.updated_at = job.queued_at
+    reserve_run(session, case.workspace_id)
     session.flush()
     audit(session, case, "system:job", "processing_queued", {"action": action, "retry": retry})
     return job
@@ -717,7 +730,7 @@ def apply_approved_update(session: Session, case: Case, version: int) -> dict[st
     audit(session, case, "system:simulated-policy-api", "update_applied", result, version)
     audit(session, case, "system:draft-template", "confirmation_drafted", {}, version)
     session.flush()
-    # The request transaction commits policy, receipt, case, and audit together.
+    # The caller commits policy, receipt, case, and audit in one transaction.
     return result
 
 

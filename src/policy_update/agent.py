@@ -1,11 +1,7 @@
-"""Bounded LangGraph tool-selection loop (tasks A03–A05).
+"""Bounded tool selection with durable checkpoints and human interrupts.
 
-The model sees the goal, a snapshot of the case, and the eight typed tools. Each step
-it either calls one tool or stops with a one-sentence summary. Every tool call runs in
-its own database transaction, so progress is durable step by step, and LangGraph
-checkpoints the loop itself: an awaiting-approval or awaiting-information case is a
-graph interrupt that a human resumes, and a crashed run continues from its last
-checkpoint. Mandatory controls live in the tools and the service layer, never here.
+Each tool runs in its own transaction. Tools and domain services enforce permissions;
+the graph chooses actions and resumes interrupted or failed runs.
 """
 
 import json
@@ -109,8 +105,6 @@ class AgentRunner:
         self._local = threading.local()
         self.graph = self._build()
 
-    # ----- graph -------------------------------------------------------------
-
     def _build(self):
         builder = StateGraph(AgentState)
         builder.add_node("decide", self._decide)
@@ -146,8 +140,7 @@ class AgentRunner:
         with self.sessions.begin() as session:
             case = service.get_case(session, state["workspace_id"], state["case_id"])
             self._guard(session)
-            # Concise decision summary only: the model's stated intent, not hidden
-            # reasoning, and never the raw request text.
+            # Store the model's brief stated intent; it remains untrusted generated text.
             service.audit(
                 session,
                 case,
@@ -258,8 +251,6 @@ class AgentRunner:
             )
             status = case.status
         return {"decision": None, "status": status, "paused": False}
-
-    # ----- running -----------------------------------------------------------
 
     def _snapshot(self, session: Session, case: Case) -> dict[str, Any]:
         """What the model may see: case state with untrusted text marked as data. Policy

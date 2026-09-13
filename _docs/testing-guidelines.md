@@ -1,8 +1,9 @@
 # Testing guidelines and coverage inventory
 
-Last inspected: 2026-09-12 (A05 worker). Read this file before adding or changing tests.
-Delivery tasks are tracked in [process.md](process.md); acceptance criterion numbers
-below refer to [plan.md](plan.md).
+Last inspected: 2026-09-13 (migrations, public-demo controls, broader UI checks). Read
+this file before adding or changing tests. Delivery tasks are tracked in
+[process.md](process.md); acceptance criterion numbers below refer to
+[plan.md](plan.md).
 
 ## What exists today
 
@@ -12,26 +13,18 @@ below refer to [plan.md](plan.md).
 [test_tools.py](../tests/test_tools.py) (9 functions / 9 cases),
 [test_agent.py](../tests/test_agent.py) (11 functions / 15 cases),
 [test_worker.py](../tests/test_worker.py) (9 functions / 9 cases), and
-[test_adversarial.py](../tests/test_adversarial.py) (4 functions / 4 cases) total
-**74 test functions, producing 97 cases after parameterization**. They exercise the
-FastAPI API with a real SQLAlchemy database through TestClient. Hosted-model
-behavior is covered only through scripted fakes and a mocked HTTP transport; there
-are no live-model or image-inspection tests in that Python inventory. A separate
-frontend browser suite is described below. This is a behavior
-inventory, not a measured line/branch coverage report.
+[test_adversarial.py](../tests/test_adversarial.py) (4 functions / 4 cases), and
+[test_operations.py](../tests/test_operations.py) (9 functions / 9 cases) total **83
+test functions, producing 106 cases after parameterization**. They exercise the FastAPI
+API with a real SQLAlchemy database through TestClient. Hosted-model behavior is covered
+only through scripted fakes and a mocked HTTP transport; there are no live-model or
+image-inspection tests in that Python inventory. A separate frontend browser suite is
+described below. This is a behavior inventory, not a measured line/branch coverage
+report.
 
-The A05 worker session (2026-09-12) ran all 92 cases on SQLite and on a dedicated
-local PostgreSQL test database (which also exercises the PostgreSQL checkpointer
-and row locks), plus lint/format checks and the demo in both worker modes without
-a model key. The live agent-mode demo and the synthetic evaluation (7/7 on
-`gemini-3.5-flash-lite`) date from the A06/A08 session earlier that day and were
-not repeated after the worker change. CI is configured, but a hosted run has not
-been verified.
-
-The model-error reporting fix (2026-09-12) adds five regression cases and verifies
-the agent, extraction, and worker modules with fakes on SQLite. It makes no live
-model call; the historical generic error cannot reveal the provider's original
-HTTP status. Existing full-suite/PostgreSQL results above predate this fix.
+Current verification results are recorded in
+[process.md](process.md#latest-verification--2026-09-13). The inventory below describes
+assertions, not hosted acceptance or measured model accuracy.
 
 [helpers.py](../tests/helpers.py) provides `run` (queue `process`/`resume`/`retry`
 for a case expecting `202`, run the app's worker inline with `drain`, and return the
@@ -126,9 +119,9 @@ the commands below. Extend an existing scenario when it already owns the behavio
   processing yields a blocked case without before-values; direct policy lookup,
   approval, execution, and proposal editing are denied.
 - `test_guest_isolation_for_every_case_endpoint` — **1 case.** A second guest cannot
-  list, read, edit, reply to, approve, reject, execute, or process the first
-  guest's case. Updating the first guest's policy does not change the second
-  guest's seeded copy. There are no attachment endpoints to test yet.
+  list, read, edit, reply to, approve, reject, execute, or process the first guest's
+  case. Updating the first guest's policy does not change the second guest's seeded
+  copy. Attachment isolation is covered separately in test_attachments.py.
 - `test_request_text_cannot_supply_approval_or_authorization` — **1 case.** A raw
   instruction-like request remains pending and cannot execute without approval.
   An extra `approved_by` input is rejected and its raw value is omitted from the
@@ -139,9 +132,8 @@ the commands below. Extend an existing scenario when it already owns the behavio
 
 ### Uploaded documents and inspection — criteria 4, 5, 6, 11, 12 (E02–E06)
 
-All in [test_attachments.py](../tests/test_attachments.py). Inspection assertions
-cover the PDF text layer only; image documents are asserted to be *uncertain*, not
-inspected.
+All in [test_attachments.py](../tests/test_attachments.py). Inspection assertions cover
+the PDF text layer only; image documents are asserted to be _uncertain_, not inspected.
 
 - `test_fixture_documents_are_listed_and_downloadable` — **1 case.** `GET /fixtures`
   lists every sample document with type/size; each download matches; downloads
@@ -197,9 +189,12 @@ model; live behavior is checked only by the demo script with a configured key.
 - `test_injected_policy_number_cannot_escalate_access` — **1 case.** A policy number
   injected into the text survives grounding but still fails the broker assignment
   check: the case is `blocked` and cannot be approved.
-- `test_model_failure_keeps_intake_retryable` — **1 case.** A retryable error yields
-  503, a non-retryable one 502; the case stays `received` with no extraction event,
-  and a later `/process` succeeds.
+- `test_model_failure_keeps_intake_retryable` — **1 case.** Queueing returns 202; the
+  worker persists a retryable 503 or non-retryable 502 model error. The case stays
+  `received` with no extraction event; a later retry succeeds.
+- `test_known_policy_number_is_passed_as_context_not_reextracted` — **1 case.** A
+  supplied policy number reaches the extraction context and cannot be replaced by the
+  model response.
 - `test_unconfigured_model_falls_back_to_structured_intake` — **1 case.** With
   `model=None`, `/health` reports `unconfigured` and free-text intake pauses with
   `missing_changes`.
@@ -338,25 +333,23 @@ unless noted.
   and a scripted decision that sleeps longer than it: the heartbeat thread has
   advanced `lease_expires_at`, a concurrent sweep finds nothing stalled, and the
   job finishes as attempt 1 under its original owner.
-- `test_requeued_attempt_runs_what_the_case_needs_now` — a job left `running`
-  after its run had fully committed is closed as `waiting` without a second
-  proposal or a failure; a resume whose first model call failed (interrupt already
-  consumed) is swept and *continued* to completion rather than refused as "not
-  waiting to be resumed".
+- `test_requeued_attempt_runs_what_the_case_needs_now` — a job left `running` after its
+  run had fully committed is closed as `waiting` without a second proposal or a failure;
+  a resume whose first model call failed (interrupt already consumed) is swept and
+  _continued_ to completion rather than refused as "not waiting to be resumed".
 - `test_embedded_worker_thread_runs_jobs_outside_the_request` —
   `worker_mode="embedded"`: `/process` returns a queued job and the background
   thread finishes it; approval plus `/resume` completes the case; shutdown joins
   the thread. The only test that runs a worker thread.
 - `test_separate_worker_process_runs_queued_jobs` — rule-based (no key): a real
-  `python -m policy_update.worker` subprocess over the same database claims and
-  runs a queued job while the API only queues (`/health` reports `external`); the
-  job's `worker_id` carries the subprocess PID; SIGTERM exits 0; the log never
-  contains the request text or the token. Run 15× in a row without a failure
-  after the worker stopped bootstrapping the schema itself (the API owns it; the
-  worker waits for the tables).
-- `test_bootstrap_adds_columns_missing_from_an_older_database` — drops
-  `processing_jobs.lease_expires_at`, re-runs `initialize_database`, and the column
-  is back; a second bootstrap is a no-op.
+  `python -m policy_update.worker` subprocess over the same database claims and runs a
+  queued job while the API only queues (`/health` reports `external`); the job's
+  `worker_id` carries the subprocess PID; SIGTERM exits 0; the log excludes the request
+  text and token. The database is initialized before the worker starts.
+- `test_explicit_migration_adds_legacy_lease_columns` — drops
+  `processing_jobs.lease_expires_at` from an unversioned legacy schema; startup refuses
+  it until an explicit migration restores the column. Repeated revision verification
+  leaves the upgraded schema intact.
 
 ### Persistence, concurrency, and failure recovery — criteria 8, 9, 10
 
@@ -386,15 +379,15 @@ the retry.
 ## Fixtures, databases, and smoke scenarios
 
 [conftest.py](../tests/conftest.py) provides `app`, `client`, `guest`, `contact`, and
-`address`. Each test gets a fresh guest. SQLite uses a temporary file by default.
-Tests create their own tables through the bootstrap `create_all`; a pre-existing
-test database created before `cases.requested_changes` existed must be recreated.
-`TEST_DATABASE_URL` selects a dedicated PostgreSQL database for the shared API
-suite; the explicit restart test always uses SQLite. PostgreSQL tests leave
-synthetic rows, so never point this variable at production/shared business data.
+`address`. Each test gets a fresh guest. SQLite uses a temporary file by default. New
+test databases initialize through Alembic. An existing unversioned test database must be
+explicitly migrated; deleting its records is not required. `TEST_DATABASE_URL` selects a
+dedicated PostgreSQL database for the shared API suite; the explicit restart test always
+uses SQLite. PostgreSQL tests leave synthetic rows, so never point this variable at
+production/shared business data.
 
 [fixtures.py](../src/policy_update/fixtures.py) provides four evidence dictionaries,
-four sample requests, and seven sample documents in `src/policy_update/assets`
+six sample requests, and seven sample documents in `src/policy_update/assets`
 (regenerate with `scripts/make_evidence_assets.py`; the PDF writer is dependency-free
 and the PNG uses Pillow, a dev dependency). `unreadable` sets both `readable` and
 `certain` to false; the readable-but-uncertain case is covered by the
@@ -404,11 +397,12 @@ authenticity.
 
 [scripts/demo.py](../scripts/demo.py) uses a running local server to exercise
 contact-only, missing evidence/correction, and conflicting evidence/correction.
-Each scenario submits intake, queues processing and polls the job until the
-worker finishes, approves through the API, and checks duplicate execution; a
-fourth scenario uploads a conflicting PDF, then a corrected PDF bound by a reply.
-This is a
-manual smoke companion, not pytest, browser automation, or an autonomous agent.
+Each scenario submits intake, queues processing, polls the worker, approves through
+the API, and checks duplicate execution. A fourth uploads a conflicting PDF, then
+a corrected PDF bound by a reply. Two additional free-text scenarios run when a
+model is configured.
+The script drives reviewer actions; the configured backend may use the agent loop.
+It is a manual smoke companion, separate from pytest and browser automation.
 It creates synthetic records and performs simulated approvals/updates.
 
 ## Commands
@@ -463,9 +457,9 @@ the pytest suite.
 6. Run affected checks, broaden when the change warrants it, then update this
    inventory with exact test names, case counts, assertions, and remaining gaps.
 
-For UI changes, follow [design-system.md](design-system.md), verify the user flow
-and relevant screenshots, and record the viewport/state checked. UI tooling has
-not been selected or installed yet.
+For UI changes, follow [design-system.md](design-system.md), verify the user flow and
+relevant screenshots, and record the viewport/state checked. The browser tooling is
+described below.
 
 ## Coverage to add as implementation proceeds
 
@@ -503,72 +497,104 @@ not been selected or installed yet.
   (2026-09-12) but is not a test. The sweeper-versus-owner lock order is proved
   by a manual PostgreSQL probe, not by the suite (SQLite has no row locks). The live evaluation covers seven texts on one model; a broader corpus
   or other providers are not measured.
-- [ ] U07 follow-ups: live-agent browser flow, Safari/Firefox, screen-reader and
-  formal contrast checks, slow-network and large-queue behavior, and automatic
-  visual differences. Core Chromium browser coverage is listed below.
-- [ ] V05–V08: migrations with retained records, guest expiry/limits/cleanup,
-  private storage configuration, host restart, and hosted smoke checks.
+- [ ] U07 follow-ups: actual Safari/VoiceOver and wider transient-state and large-queue
+      checks. Three-engine, contrast, and slow-submission checks are recorded below.
+      Live Gemini flows were checked manually.
+- [ ] V08: actual hosting configuration, scheduled cleanup, host restart, and hosted
+      smoke checks.
 - [ ] V09: separately measured synthetic model extraction and end-to-end outcomes.
 
 These gaps are not a request to write speculative tests before their feature
 exists. Add coverage alongside the behavior or when a concrete risk is investigated.
 
-
 ## Dashboard browser coverage — U01–U07
 
-[dashboard.spec.ts](../frontend/tests/dashboard.spec.ts) contains **9 Chromium
-scenarios** (including two evidence variants) separate from the Python inventory:
+[dashboard.spec.ts](../frontend/tests/dashboard.spec.ts) contains **11 scenarios per
+engine, 33 checks across Chromium, Firefox, and WebKit**:
 
-1. Guest entry, sample contact intake, comparison, separate version-bound approval
-   and application, confirmation draft, persisted update activity, and reload.
-2. Missing evidence blocks approval of the whole request; corrected PDF/reply
-   creates version 2 with a page reference and authenticated download.
-3. Conflicting evidence follows the same correction path.
-4. Editing after approval invalidates it; an intervening API edit causes a stale
-   dialog submission to fail while retaining input; refresh permits fresh review.
-5. Rejection records its reason and removes approval actions.
-6. HttpOnly/Strict cookie, separate guest contexts, cross-workspace 404, and
-   cross-origin write rejection through the Next.js proxy.
-7. Unassigned broker reaches Access blocked without current contact values or
-   approval controls.
-8. Narrow viewport has no horizontal document overflow; keyboard tabs and dialog
-   escape/focus restoration work; a mocked approval-service outage stays an error,
-   never an applied update.
-9. A scripted extraction 429 is persisted on the real job, displayed with safe
-   detail, and retried through the UI to a pending proposal on attempt 2.
+1. Guest entry, contact intake, comparison, separate approval/application, confirmation
+   draft, persisted activity, and reload.
+2. Delayed intake disables duplicate submission, retains the modal, and saves one case.
+3. An invalid guest cookie clears the previous case selection and allows a fresh
+   workspace.
+4. Missing evidence blocks approval; a corrected PDF/reply creates version 2.
+5. Conflicting evidence follows the same correction path.
+6. Editing invalidates approval; a stale dialog submission fails and retains input.
+7. Rejection records its reason and removes approval actions.
+8. HttpOnly/Strict cookies, separate guest contexts, cross-workspace 404, and
+   cross-origin write rejection through the proxy.
+9. Unassigned broker access shows no current policy contact values or approval controls.
+10. Narrow viewport, keyboard tabs, dialog Escape/focus restoration, and a mocked
+    approval outage that remains an error.
+11. A scripted extraction 429 is persisted, shown safely, and retried to a proposal.
 
-The test server [serve_backend.py](../frontend/tests/serve_backend.py) uses a fresh
-TemporaryDirectory SQLite database, explicit scripted extraction fake, no agent
-model, and an embedded worker. Unexpected model inputs fail loudly. It does not
-load `.env`, use live Gemini, or touch the normal `policy_demo.db`. Playwright
-starts ports **8001/3001** and refuses to reuse existing servers. Its browser
-contexts are isolated from the user's browser. Build before testing:
+The capture helper runs axe WCAG A/AA checks on saved states and the delayed-intake
+modal in each engine. Screenshot files are generated only when requested, in Chromium;
+they are reviewed references, not pixel-comparison assertions.
+
+[serve_backend.py](../frontend/tests/serve_backend.py) starts a fresh temporary SQLite
+API with a scripted extraction fake, no agent model, and an embedded worker. Unexpected
+free-text inputs fail. Playwright uses ports **8001/3001**, refuses to reuse existing
+servers, and creates isolated browser contexts. It does not load `.env`, call Gemini, or
+use `policy_demo.db`.
+
+From the repository root, then inside `frontend`:
 
 ```sh
 uv sync --locked
 cd frontend
 npm ci
-npx playwright install chromium
+npx playwright install chromium firefox webkit
 npm run format:check
 npm run typecheck
 npm run build
 npm test
 ```
 
-To intentionally regenerate reference screenshots, use
-`CAPTURE_BASELINE=1 npm test` (or `env CAPTURE_BASELINE=1 npm test` in fish).
-Images go to `_docs/screenshots/`; viewport/state links are in the
-[design baseline](design-system.md). Review generated images before accepting them.
-The images are reference artifacts, not automatic pixel-comparison assertions.
+Optional: to generate 14 synthetic reference images in `_docs/screenshots/`, run
+`CAPTURE_BASELINE=1 npm test -- --project=chromium` after a build. Review the images
+for visual QA; saved images are not required by tests. State/viewport details live in
+[design-system.md](design-system.md).
 
-Local verification on 2026-09-12: production build, TypeScript, and formatting
-passed; **9/9 Chromium scenarios passed**. A new [frontend CI workflow](../.github/workflows/frontend.yml)
-configures the same checks; hosted execution is not yet verified. These checks do
-not establish live-agent behavior, deployed operation, or a complete accessibility
-audit. Existing backend suite results elsewhere in this file are historical and
-were not repeated for this frontend implementation.
+## Operational coverage — V05–V07
 
+[test_operations.py](../tests/test_operations.py) covers:
 
-D003 UI simplification (2026-09-12): updated the existing empty-state assertion
-for “No requests yet” and regenerated the same desktop/mobile reference scenarios.
-No additional test cases or live-model calls were introduced.
+- Legacy migration retains completed receipts, proposal/audit history, and idempotent
+  replay; the resulting schema matches application metadata.
+- Revision 0001 → 0002 retains attachment bytes and backfills usage counters.
+- Expiry denies API access and queued processing; cleanup preserves other guests.
+- Case/file/run limits reject excess operations without consuming rejected budgets.
+- Independent sessions cannot reserve the same final quota unit.
+- Oversized request bodies are refused before multipart parsing.
+- Verify mode refuses an unmigrated database.
+- Cleanup deletes real LangGraph checkpoint threads and private attachment bytes.
+- A global queue limit rolls back the new job and workspace budget reservation.
+
+With `TEST_DATABASE_URL`, migration/cleanup retention tests create their own schema and
+drop only that schema at teardown. Other PostgreSQL tests create synthetic guests. Use a
+dedicated UTF-8 test database; never use a shared business database.
+
+[scripts/smoke_containers.py](../scripts/smoke_containers.py) separately checks the
+model-free Compose stack: private proxy, separate worker, explicit approval, receipt
+replay, persisted waiting case, PDF correction, and cross-guest case/file denial.
+`--restart` also restarts PostgreSQL, API, worker, and frontend. Follow the
+[runbook](deployment.md#local-container-verification) for the matching project name.
+
+## Manual and hosted evidence
+
+The owner reported three local Gemini/dashboard scenarios passing on 2026-09-13: valid
+approval/application, missing evidence corrected on the same case, and conflicting
+evidence corrected on the same case. Case IDs, timings, and recordings were not
+retained. This is separate from automated checks with scripted models. The earlier
+seven-request synthetic Gemini evaluation is recorded under A08 in
+[process.md](process.md); it does not measure broad accuracy or attack resistance.
+
+Remaining U07 checks: actual Safari, keyboard-only navigation at 200% zoom, and
+VoiceOver. Verify queue/status announcements, tabs, table headers, dialog titles, focus,
+and validation/retry errors; complete evidence correction and approval without a mouse.
+Record browser/macOS versions and findings. Axe and Playwright WebKit do not establish
+screen-reader or Safari application coverage.
+
+Hosted CI, deployment/restart acceptance, model latency/cost measurements, and demo
+recordings remain pending. Add actual results to the delivery checklist when run.

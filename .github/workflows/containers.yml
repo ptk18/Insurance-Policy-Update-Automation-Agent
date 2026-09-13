@@ -1,0 +1,18 @@
+name: Container smoke
+on: [push, pull_request]
+jobs:
+  containers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: docker compose --env-file /dev/null -p policy-verify up --build -d --wait
+        env:
+          GEMINI_API_KEY: ""
+      - run: uv run python scripts/smoke_containers.py --restart
+      - if: always()
+        run: docker compose --env-file /dev/null -p policy-verify down

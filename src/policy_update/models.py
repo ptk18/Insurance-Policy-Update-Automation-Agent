@@ -26,6 +26,14 @@ class Workspace(Base):
     created_at: Mapped[str] = mapped_column(default=now)
 
 
+class ResourceUsage(Base):
+    """Persistent quota counters shared by API and worker processes."""
+
+    __tablename__ = "resource_usage"
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    amount: Mapped[int] = mapped_column(default=0)
+
+
 class Policy(Base):
     __tablename__ = "policies"
     __table_args__ = (UniqueConstraint("workspace_id", "number"),)

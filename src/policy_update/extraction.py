@@ -190,7 +190,7 @@ class Extraction:
         return findings
 
     def summary(self) -> dict[str, Any]:
-        # Audit-safe: field names and counts, plus the values the case will now carry.
+        # Case audit data includes extracted values and untrusted model findings.
         return {
             "policy_number": self.policy_number,
             "changes": self.changes,
@@ -417,8 +417,7 @@ class GeminiClient:
         return Decision(calls[0].get("name", ""), arguments, text, parts)
 
     def _post(self, body: dict[str, Any]) -> dict[str, Any]:
-        # One bounded retry absorbs the free tier's momentary 503/429 answers; anything
-        # longer is reported as retryable so the case stays received for a later attempt.
+        # Retry transient failures within the call budget; the worker persists final errors.
         delay = self.retry_delay
         for attempt in range(self.attempts):
             if attempt:

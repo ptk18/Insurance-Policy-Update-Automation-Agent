@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from helpers import FakeChat, action, call, drain, run
 from policy_update.api import create_app
-from policy_update.database import initialize_database
+from policy_update.database import initialize_database, make_database, upgrade_database
 from policy_update.extraction import ModelError
 from policy_update.models import Case, ProcessingJob
 from policy_update.worker import Worker
@@ -312,12 +312,22 @@ def test_separate_worker_process_runs_queued_jobs(tmp_path):
     assert REQUEST not in output and guest["Authorization"][7:] not in output
 
 
-def test_bootstrap_adds_columns_missing_from_an_older_database(app, client):
-    engine = app.state.engine
+def test_explicit_migration_adds_legacy_lease_columns(tmp_path):
+    from alembic import command
+
+    from policy_update.database import migration_config
+
+    engine, _ = make_database(f"sqlite:///{tmp_path / 'legacy.db'}")
+    with engine.begin() as connection:
+        command.upgrade(migration_config(connection), "0001")
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE processing_jobs DROP COLUMN lease_expires_at"))
-    initialize_database(engine)
+        connection.execute(text("DROP TABLE alembic_version"))
+    with pytest.raises(RuntimeError, match="upgrade required"):
+        initialize_database(engine)
+    upgrade_database(engine)
     with engine.begin() as connection:
         connection.execute(text("SELECT lease_expires_at FROM processing_jobs WHERE 1 = 0")).all()
-    # Idempotent: a second bootstrap over the complete schema changes nothing.
+    # Startup now verifies the version; it never repairs a deployed schema silently.
     initialize_database(engine)
+    engine.dispose()

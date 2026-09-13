@@ -19,7 +19,7 @@ class ScriptedExtraction:
     def extract(self, text, context=None):
         assert text == "RETRY-SCENARIO: DEMO-1001 email to retry@example.com"
         self.attempts += 1
-        if self.attempts == 1:
+        if self.attempts % 2 == 1:
             raise ModelError("Model request returned HTTP 429 RESOURCE_EXHAUSTED", True)
         return ModelResponse(
             data={

@@ -2,7 +2,11 @@ import { cookies } from "next/headers";
 
 // Server-only: never expose the workspace bearer token to browser JavaScript.
 export const SESSION = "policy_workspace";
-export const backendUrl = process.env.POLICY_API_URL || "http://127.0.0.1:8000";
+export const backendUrl =
+  process.env.POLICY_API_URL ||
+  (process.env.POLICY_API_HOST
+    ? `http://${process.env.POLICY_API_HOST}:8000`
+    : "http://127.0.0.1:8000");
 export const jsonError = (detail: string, status: number) =>
   Response.json(
     { detail },

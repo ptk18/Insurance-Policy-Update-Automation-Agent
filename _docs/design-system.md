@@ -1,13 +1,13 @@
 # Design baseline and change record
 
-Last inspected: 2026-09-12. Read before changing the UI. Scope comes from
+Last inspected: 2026-09-13. Read before changing the UI. Scope comes from
 [plan.md](plan.md); delivery tasks live in [process.md](process.md).
 
 ## Current baseline: Minimal review workspace (D003)
 
-The Next.js/React dashboard is implemented in [frontend](../frontend/).
-Open port **3000** for the product; port 8000 `/docs` is the API explorer.
-The UI uses the existing backend and shows persisted synthetic case data.
+The Next.js/React dashboard is implemented in [frontend](../frontend/). The README
+starts the product on port **3002** (Next.js defaults to 3000); port 8000 `/docs` is the
+API explorer. The UI uses the existing backend and shows persisted synthetic case data.
 It creates no example cases until the guest submits a request.
 
 ### Source of truth
@@ -25,9 +25,9 @@ It creates no example cases until the guest submits a request.
 
 ### Visual decisions
 
-- Palette: page `#f7f8f5`, white surfaces, ink `#243730`, secondary text `#66756e`,
-  borders `#e2e7e1`, primary green `#24674f`, hover `#194f3c`, focus `#39715d`.
-  Use the CSS semantic variables for success, information, warning, and error.
+- Palette: page `#f7f8f5`, white surfaces, ink `#243730`, secondary text `#5d6c64`,
+  borders `#e2e7e1`, primary green `#24674f`, hover `#194f3c`, focus `#39715d`. Use the
+  CSS semantic variables for success, information, warning, and error.
 - Typography: local Arial/Helvetica throughout. Main heading 24–26 px, case and
   dialog headings 20–22 px, primary content 12–14 px. Use plain descriptive headings
   and readable values. No display serif, slogans, or remote font requests.
@@ -88,11 +88,15 @@ Job status is separate: queued, running, waiting, completed, or failed. A failed
 job must remain visible even if the case itself still says Received/Processing.
 Historical proposal states are shown as historical, never as current approval.
 
-## Screenshot baseline and verification
+## Browser states and verification
 
-The [browser suite](../frontend/tests/dashboard.spec.ts) captures these synthetic
-states with `CAPTURE_BASELINE=1 npm test` after a production build. Wide viewport
-is **1440 × 1050**, narrow **390 × 844**; full-page images may be taller.
+The [browser suite](../frontend/tests/dashboard.spec.ts) checks guest entry, empty
+workspace, desktop/mobile review, missing/conflicting/corrected evidence,
+approved/pending, completed, rejected, blocked access, stale edits, failed
+processing, and slow submission. Wide viewport is **1440 × 1050**, narrow
+**390 × 844**; full-page images may be taller.
+
+Reference screenshots are saved in `screenshots/`:
 
 - [Guest entry](screenshots/welcome-wide.png), [empty workspace](screenshots/empty-wide.png).
 - [Ready for review](screenshots/ready-wide.png), [mobile review](screenshots/ready-mobile.png).
@@ -100,17 +104,23 @@ is **1440 × 1050**, narrow **390 × 844**; full-page images may be taller.
   [corrected PDF](screenshots/corrected-wide.png).
 - [Approved/pending](screenshots/approved-wide.png), [completed](screenshots/completed-wide.png),
   [rejected](screenshots/rejected-wide.png), [blocked access](screenshots/blocked-wide.png).
-- [Stale edit](screenshots/stale-version-wide.png), [failed processing](screenshots/failed-wide.png).
+- [Stale edit](screenshots/stale-version-wide.png), [failed processing](screenshots/failed-wide.png),
+  [saving request](screenshots/saving-request.png).
 
-Checks cover the real local API with temporary SQLite data, rule-based processing,
-PDF inspection, and a scripted extraction failure/retry. They do not call Gemini.
-Keyboard tabs, dialog focus/escape, and horizontal overflow are checked in Chromium.
+`CAPTURE_BASELINE=1 npm test -- --project=chromium` regenerates them for visual review.
+The application and automated assertions do not depend on saved image files.
+
+Checks cover the real local API with temporary SQLite data, rule-based processing, PDF
+inspection, and a scripted extraction failure/retry. They do not call Gemini. Keyboard
+tabs, dialog focus/escape, and horizontal overflow are checked in all three engines.
 Desktop/mobile review and evidence screenshots were visually inspected. These are
-reference images, not pixel-difference regression tests or an accessibility certification.
+reference images, not pixel-difference regression tests or an accessibility
+certification.
 
-Remaining: live-agent browser verification, Safari/Firefox, screen-reader and
-formal contrast audits, automated visual comparisons, slow-network/loading and
-large-queue behavior, and deployment. Image inspection and case chat stay deferred.
+Remaining: actual Safari/VoiceOver checks, broader loading/large-queue behavior, and
+hosted verification. The three live Gemini browser scenarios were checked manually.
+Chromium/Firefox/WebKit have workflow, axe contrast/accessibility, and delayed-intake
+checks. Image inspection and case chat stay deferred.
 
 ## Drift prevention
 
@@ -135,12 +145,11 @@ Implemented the Policy desk visual system and core request-to-review workflow ab
 Added the current tokens, reusable forms/notices/dialogs, responsive queue/detail,
 source downloads, manual approval/application, correction/retry, and audit history.
 Browser checks exposed and fixed local origin validation and dialog focus restoration.
-Verification and screenshots are listed above; wider accessibility and hosted-agent
+Verification is described above; wider accessibility and hosted-agent
 validation remain open. Supersedes the visual absence recorded in D001.
 
 Append future decisions with date/ID, affected component/states, previous/new behavior,
 reason, shared-code references, screenshots/viewports, actual checks, and remaining work.
-
 
 ### D003 — 2026-09-12 — Simplify the review workspace
 
@@ -159,3 +168,20 @@ D002's layout/typography; its workflow and approval constraints remain in force.
 
 Future UI work should preserve this minimal baseline: add controls only when they
 help complete a request; avoid decorative panels, repeated counts, or promotional copy.
+
+
+### D004 — 2026-09-13 — Contrast and cross-browser focus
+
+Preserved D003's minimal layout. Changed `--muted` from `#66756e` to `#5d6c64` and
+reused it for small evidence labels: axe measured insufficient contrast on the selected
+queue background and the evidence-label surface. Modal opener buttons now explicitly
+receive focus on activation, allowing WebKit to restore focus when Escape closes a
+dialog. No extra navigation or decorative panels were added.
+
+Verification: three browser engines, axe WCAG A/AA on the saved review states and
+slow-intake modal, and desktop/390px review. Added the
+saving-request reference state. Screenshots were
+visually reviewed. Manual screen-reader checks and actual Safari remain open.
+
+Guest-expiry behavior: an API 401 clears the guest cookie and selected case so “Open
+demo workspace” can start a fresh session. This does not add a new screen.

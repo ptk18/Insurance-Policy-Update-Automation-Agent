@@ -1,10 +1,6 @@
-"""Typed, case-scoped tools for the bounded agent (task A02).
+"""Typed, case-scoped agent tools backed by the review API's domain controls.
 
-Every tool runs against one already-authorized case inside the caller's transaction and
-delegates to the same service functions the review API uses, so sandbox isolation,
-broker authorization, permitted fields, evidence prerequisites, approval versions, and
-idempotent execution are enforced here exactly as everywhere else. Reviewer operations
-(approve, reject, edit) and the guest's bearer token are intentionally not reachable.
+Calls share the caller's transaction. Reviewer operations and credentials are excluded.
 """
 
 from collections.abc import Callable
@@ -334,6 +330,6 @@ def run_tool(context: ToolContext, name: str, arguments: dict[str, Any] | None) 
         "case_status": context.case.status,
     }
     context.calls.append(record)
-    # Argument names and outcome only: values already live in proposals, not audit logs.
+    # Tool-call events omit values; proposal audit events record the proposed changes.
     service.audit(context.session, context.case, f"agent:{context.actor}", "tool_called", record)
     return outcome

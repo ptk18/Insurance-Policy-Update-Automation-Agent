@@ -1,0 +1,63 @@
+# Local synthetic demo. Set GEMINI_API_KEY= and use --env-file /dev/null for tests.
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: policy
+      POSTGRES_PASSWORD: local-demo-only
+      POSTGRES_DB: policy
+    volumes:
+      - policy-db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U policy -d policy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  migrate:
+    build: .
+    command: [python, -m, policy_update.migrate]
+    environment:
+      DATABASE_URL: postgresql+psycopg://policy:local-demo-only@db:5432/policy
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    build: .
+    restart: unless-stopped
+    environment: &backend
+      DATABASE_URL: postgresql+psycopg://policy:local-demo-only@db:5432/policy
+      SCHEMA_MODE: verify
+      WORKER_MODE: external
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      JOB_LEASE_SECONDS: 180
+      MAX_DAILY_RUNS: 100
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  worker:
+    build: .
+    restart: unless-stopped
+    command: [python, -m, policy_update.worker]
+    environment: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 90s
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      POLICY_API_URL: http://api:8000
+      COOKIE_SECURE: "false"
+    ports: ["127.0.0.1:3003:3000"]
+    depends_on:
+      api:
+        condition: service_healthy
+volumes:
+  policy-db:

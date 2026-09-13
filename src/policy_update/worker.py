@@ -1,16 +1,8 @@
-"""The processing worker (task A05): claims queued jobs, runs rule-based processing or
-the agent loop outside any API request, and recovers jobs whose worker died.
+"""Claim durable jobs, renew leases, and recover stalled processing.
 
-The queue is the ``processing_jobs`` table. A claim is a compare-and-set update on a
-``queued`` row that sets this worker's ID and a lease; a heartbeat thread renews the
-lease while the attempt runs, and every processing step re-checks ownership inside
-its own transaction (``service.owned_job``), so a worker that paused past its lease
-stops instead of acting on a case another worker has taken over. Lapsed leases are
-swept back into the queue (``processing_stalled``) until ``max_attempts``, after
-which the job fails visibly for a manual ``/retry``.
-
-Run it embedded (``WORKER_MODE=embedded``, a thread in the API process) or as a
-separate process: ``python -m policy_update.worker``.
+Each processing transaction rechecks job ownership. Lapsed leases are requeued up
+to ``max_attempts``, then require manual retry. Run embedded in the API or with
+``python -m policy_update.worker``.
 """
 
 import logging
@@ -61,8 +53,6 @@ class Worker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    # ----- queue ----------------------------------------------------------------
-
     def sweep_stalled(self) -> list[str]:
         """Re-queue (or fail) every running job whose lease lapsed. Any worker may
         sweep; the compare-and-set inside makes concurrent sweeps harmless."""
@@ -112,12 +102,12 @@ class Worker:
                 break  # every candidate was claimed by someone else
         return ran
 
-    # ----- one attempt ----------------------------------------------------------
-
     def _owned(self, case_id: str) -> Callable[[Session], None]:
         # Lock order everywhere: the case row (get_case) first, then the job row.
         def guard(session: Session):
             service.owned_job(session, case_id, self.id)
+            job = session.get(ProcessingJob, case_id)
+            service.require_active(session, job.workspace_id)
 
         return guard
 
@@ -224,8 +214,9 @@ class Worker:
             try:
                 if self.run_pending():
                     continue  # drained something; look again without waiting
-            except Exception:
-                log.exception("worker %s: polling error", self.id)
+            except Exception as error:
+                # Traceback/SQL parameters may include credentials or request text.
+                log.error("worker %s: polling error (%s)", self.id, type(error).__name__)
             stop.wait(self.poll_seconds)
 
     def start(self) -> threading.Thread:
@@ -251,8 +242,7 @@ def main() -> None:
     stop = threading.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stop.set())
-    # The API process owns schema bootstrap; two bootstrappers on one fresh database
-    # race each other, so the worker only waits for the tables to appear.
+    # Local mode waits for API initialization; verify mode has already checked the revision.
     while not stop.is_set() and not inspect(runtime.engine).has_table("processing_jobs"):
         log.info("waiting for the API to create the database schema")
         stop.wait(2)

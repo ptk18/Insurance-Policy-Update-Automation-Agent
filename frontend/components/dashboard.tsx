@@ -77,6 +77,8 @@ export default function Dashboard() {
         requestEpoch.current++;
       }
       if (value.status === 401) {
+        selectedRef.current = null;
+        setSelected(null);
         setConnected(false);
         setCases([]);
         setFixtures(null);
@@ -245,11 +247,20 @@ export default function Dashboard() {
             <button
               className="button quiet"
               disabled={!fixtures}
-              onClick={() => setModal("samples")}
+              onClick={(event) => {
+                event.currentTarget.focus();
+                setModal("samples");
+              }}
             >
               Sample library
             </button>
-            <button className="button quiet" onClick={() => setModal("help")}>
+            <button
+              className="button quiet"
+              onClick={(event) => {
+                event.currentTarget.focus();
+                setModal("help");
+              }}
+            >
               Help
             </button>
           </nav>
@@ -263,7 +274,10 @@ export default function Dashboard() {
             {connected && (
               <button
                 className="button primary"
-                onClick={() => setModal("intake")}
+                onClick={(event) => {
+                  event.currentTarget.focus();
+                  setModal("intake");
+                }}
                 disabled={!fixtures || busy}
               >
                 <Plus size={17} />
@@ -379,14 +393,20 @@ export default function Dashboard() {
                   <p>Create a request from a broker email or a sample.</p>
                   <button
                     className="button primary"
-                    onClick={() => setModal("intake")}
+                    onClick={(event) => {
+                      event.currentTarget.focus();
+                      setModal("intake");
+                    }}
                   >
                     <Plus size={17} />
                     Create request
                   </button>
                   <button
                     className="text-button"
-                    onClick={() => setModal("samples")}
+                    onClick={(event) => {
+                      event.currentTarget.focus();
+                      setModal("samples");
+                    }}
                   >
                     Explore sample documents <ArrowRight size={15} />
                   </button>
@@ -817,14 +837,20 @@ export default function Dashboard() {
                               <button
                                 className="button quiet"
                                 disabled={disabled}
-                                onClick={() => setModal("reject")}
+                                onClick={(event) => {
+                                  event.currentTarget.focus();
+                                  setModal("reject");
+                                }}
                               >
                                 Reject
                               </button>
                               <button
                                 className="button secondary"
                                 disabled={disabled}
-                                onClick={() => setModal("reply")}
+                                onClick={(event) => {
+                                  event.currentTarget.focus();
+                                  setModal("reply");
+                                }}
                               >
                                 Add information
                               </button>
@@ -925,7 +951,10 @@ export default function Dashboard() {
             ))}
             <button
               className="button primary"
-              onClick={() => setModal("intake")}
+              onClick={(event) => {
+                event.currentTarget.focus();
+                setModal("intake");
+              }}
             >
               Create a request
               <Plus size={17} />
@@ -1080,7 +1109,14 @@ function ReviewSummary({
             <p>Compare each value before making your decision.</p>
           </div>
           {edit && (
-            <button className="text-button" disabled={disabled} onClick={edit}>
+            <button
+              className="text-button"
+              disabled={disabled}
+              onClick={(event) => {
+                event.currentTarget.focus();
+                edit?.();
+              }}
+            >
               Edit changes
             </button>
           )}

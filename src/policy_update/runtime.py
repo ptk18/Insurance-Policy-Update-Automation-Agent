@@ -1,6 +1,4 @@
-"""The processing stack shared by the API process and a separate worker process:
-database sessions, the configured models, the agent runner, and the worker that
-claims jobs. Both entry points build it the same way from ``.env``/environment."""
+"""Build the database, models, agent, and worker for both service entry points."""
 
 import os
 from dataclasses import dataclass
@@ -8,7 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import sessionmaker
 
 from policy_update.agent import AgentRunner, make_checkpointer
-from policy_update.database import make_database
+from policy_update.database import make_database, normalize_url, require_current_schema
 from policy_update.extraction import ChatModel, ModelClient, model_from_env
 from policy_update.settings import load_env_file
 from policy_update.worker import Worker
@@ -26,8 +24,6 @@ class Runtime:
     model: ModelClient | None
     agent: AgentRunner | None
     worker: Worker
-    # ``embedded``: the API process runs a worker thread; ``external``: only
-    # ``python -m policy_update.worker`` processes claim jobs.
     worker_mode: str
 
 
@@ -47,8 +43,12 @@ def build_runtime(
     if agent_model is FROM_ENV:
         enabled = os.environ.get("AGENT_LOOP", "on").lower() not in {"off", "0", "false"}
         agent_model = model if enabled and hasattr(model, "choose") else None
-    database_url = database_url or os.environ.get("DATABASE_URL", "sqlite:///./policy_demo.db")
+    database_url = normalize_url(
+        database_url or os.environ.get("DATABASE_URL", "sqlite:///./policy_demo.db")
+    )
     engine, sessions = make_database(database_url)
+    if os.environ.get("SCHEMA_MODE") == "verify":
+        require_current_schema(engine)
     agent = (
         AgentRunner(
             agent_model,

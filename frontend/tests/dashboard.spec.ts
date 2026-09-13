@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
+import AxeBuilder from "@axe-core/playwright";
 
 const detail = (page: Page) =>
   page.getByRole("region", { name: "Selected request" });
@@ -27,7 +28,21 @@ async function create(page: Page, sample = "0", broker?: string) {
   ).toBeVisible();
 }
 async function capture(page: Page, name: string) {
+  const audit = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+    .analyze();
+  expect(
+    audit.violations.map((v) => ({
+      id: v.id,
+      nodes: v.nodes.map((node) => ({
+        target: node.target,
+        issue: node.failureSummary,
+      })),
+    })),
+    `Accessibility: ${name}`,
+  ).toEqual([]);
   if (process.env.CAPTURE_BASELINE !== "1") return;
+  if (test.info().project.name !== "chromium") return;
   const directory = resolve("../_docs/screenshots");
   await mkdir(directory, { recursive: true });
   await page.screenshot({ path: `${directory}/${name}.png`, fullPage: true });
@@ -68,6 +83,64 @@ test("contact request is reviewed, explicitly approved, applied, and retained af
   await expect(
     detail(page).getByText("Completed", { exact: true }),
   ).toBeVisible();
+});
+
+test("slow intake prevents duplicate submission and retains a single saved request", async ({
+  page,
+}) => {
+  await openWorkspace(page);
+  await page.getByRole("button", { name: "New request", exact: true }).click();
+  await page.getByLabel("Try a sample").selectOption("0");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/backend/cases", async (route) => {
+    if (route.request().method() === "POST") await gate;
+    await route.continue();
+  });
+  try {
+    await page
+      .getByRole("button", { name: "Create & process request" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Saving request…" }),
+    ).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await capture(page, "saving-request");
+  } finally {
+    release();
+  }
+  await expect(page.getByRole("button", { name: "Approve v1" })).toBeVisible();
+  const rows = await (await page.request.get("/api/backend/cases")).json();
+  expect(rows).toHaveLength(1);
+});
+
+test("an expired guest can open a new workspace without stale case selection", async ({
+  page,
+}) => {
+  await openWorkspace(page);
+  await create(page);
+  await page.context().addCookies([
+    {
+      name: "policy_workspace",
+      value: "invalid-synthetic-test-token",
+      url: "http://127.0.0.1:3001",
+      httpOnly: true,
+      sameSite: "Strict",
+    },
+  ]);
+  await page.getByRole("button", { name: "Refresh cases" }).click();
+  await expect(
+    page.getByRole("button", { name: "Open demo workspace" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Open demo workspace" }).click();
+  await expect(
+    page.getByRole("heading", { name: "No requests yet" }),
+  ).toBeVisible();
+  await create(page);
+  await expect(page.getByRole("button", { name: "Approve v1" })).toBeVisible();
 });
 
 for (const [sample, label] of [
@@ -205,7 +278,7 @@ test("unassigned broker is blocked without revealing policy contact values", asy
   await expect(
     detail(page).getByText("Access blocked", { exact: true }),
   ).toBeVisible();
-  await expect(detail(page)).not.toContainText("sam.taylor@example.com");
+  await expect(detail(page)).not.toContainText("sam@example.com");
   await expect(page.getByRole("button", { name: /^Approve/ })).toHaveCount(0);
   await capture(page, "blocked-wide");
 });

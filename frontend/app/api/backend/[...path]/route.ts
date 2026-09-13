@@ -35,15 +35,35 @@ async function proxy(
     const headers = new Headers();
     const contentType = request.headers.get("content-type");
     if (contentType) headers.set("Content-Type", contentType);
-    const body =
-      request.method === "GET" ? undefined : await request.arrayBuffer();
-    if (body && body.byteLength > 6 * 1024 * 1024)
-      return jsonError("The attachment is too large (5 MB maximum).", 413);
+    let body: ArrayBuffer | undefined;
+    if (request.method !== "GET" && request.body) {
+      const reader = request.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > 6 * 1024 * 1024) {
+          await reader.cancel();
+          return jsonError("The attachment is too large (5 MB maximum).", 413);
+        }
+        chunks.push(chunk.value);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      body = bytes.buffer;
+    }
     const upstream = await backendFetch(`/${path}`, {
       method: request.method,
       headers,
       body,
     });
+    if (upstream.status === 401) (await cookies()).delete(SESSION);
     const responseHeaders = new Headers({
       "Cache-Control": "private, no-store",
     });

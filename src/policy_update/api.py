@@ -15,6 +15,8 @@ from policy_update import service
 from policy_update.database import initialize_database
 from policy_update.extraction import ChatModel, ModelClient
 from policy_update.fixtures import BROKERS, DOCUMENTS, EVIDENCE, SAMPLES, document_bytes
+from policy_update.limits import require_active
+from policy_update.middleware import RequestLimitMiddleware
 from policy_update.models import Case, ProcessingJob, Workspace
 from policy_update.runtime import FROM_ENV, build_runtime
 from policy_update.schemas import BrokerId, Intake, ProposalEdit, Rejection, Reply, VersionAction
@@ -42,7 +44,7 @@ def workspace_dependency(
     )
     if workspace is None:
         raise HTTPException(401, "Invalid guest workspace token")
-    return workspace
+    return require_active(session, workspace.id)
 
 
 Guest = Annotated[Workspace, Depends(workspace_dependency)]
@@ -52,8 +54,7 @@ def owner_dependency(
     request: Request,
     credential: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> str:
-    # Agent routes must not hold a request-long transaction: each graph step opens
-    # its own, so authenticate in a short one and return only the workspace ID.
+    # Queue routes authenticate separately from the transaction that reserves the job.
     if credential is None:
         raise HTTPException(401, "A guest workspace bearer token is required")
     with request.app.state.sessions.begin() as session:
@@ -62,6 +63,8 @@ def owner_dependency(
                 Workspace.token_hash == service.token_hash(credential.credentials)
             )
         )
+        if workspace_id is not None:
+            require_active(session, workspace_id)
     if workspace_id is None:
         raise HTTPException(401, "Invalid guest workspace token")
     return workspace_id
@@ -120,6 +123,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.sessions = sessions
+    app.add_middleware(RequestLimitMiddleware, maximum=attachment_limit + 1024 * 1024)
     app.state.engine = engine
     app.state.model = model
     app.state.agent = agent
@@ -197,7 +201,7 @@ def create_app(
 
     @app.post("/cases", status_code=201)
     def intake(data: Intake, session: Db, guest: Guest):
-        # Persist only. Processing runs in its own transaction via /cases/{id}/process.
+        # Persist intake before a separate request queues processing.
         case = service.create_case(session, guest.id, data)
         return service.case_view(session, case)
 
@@ -235,7 +239,7 @@ def create_app(
     @app.post("/cases/{case_id}/attachments", status_code=201)
     def upload(case_id: str, file: Annotated[UploadFile, File()], session: Db, guest: Guest):
         case = service.get_case(session, guest.id, case_id)
-        # Read at most one byte past the limit so an oversized body is never buffered.
+        # Read one extra byte to detect files over the limit after multipart parsing.
         content = file.file.read(attachment_limit + 1)
         attachment = service.store_attachment(
             session, case, file.filename, content, attachment_limit

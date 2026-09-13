@@ -1,0 +1,74 @@
+# Reviewable deployment proposal, not a deployed service. These plans are paid.
+# PostgreSQL stores private attachment bytes; no public bucket is provisioned.
+services:
+  - type: pserv
+    name: policy-api
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    preDeployCommand: python -m policy_update.migrate
+    envVars:
+      - fromGroup: policy-runtime
+      - key: DATABASE_URL
+        fromDatabase:
+          name: policy-db
+          property: connectionString
+  - type: worker
+    name: policy-worker
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python -m policy_update.worker
+    envVars:
+      - fromGroup: policy-runtime
+      - key: DATABASE_URL
+        fromDatabase:
+          name: policy-db
+          property: connectionString
+  - type: web
+    name: policy-dashboard
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    rootDir: frontend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/backend/health
+    envVars:
+      - key: POLICY_API_HOST
+        fromService:
+          type: pserv
+          name: policy-api
+          property: host
+      - key: COOKIE_SECURE
+        value: "true"
+databases:
+  - name: policy-db
+    plan: basic-256mb
+    region: singapore
+    postgresMajorVersion: "17"
+    ipAllowList: []
+envVarGroups:
+  - name: policy-runtime
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: SCHEMA_MODE
+        value: verify
+      - key: WORKER_MODE
+        value: external
+      - key: JOB_LEASE_SECONDS
+        value: "180"
+      - key: GUEST_TTL_SECONDS
+        value: "604800"
+      - key: MAX_WORKSPACES
+        value: "200"
+      - key: MAX_WORKSPACE_CASES
+        value: "25"
+      - key: MAX_WORKSPACE_RUNS
+        value: "50"
+      - key: MAX_DAILY_RUNS
+        value: "100"

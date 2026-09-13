@@ -8,13 +8,11 @@ from policy_update.api import create_app
 
 @pytest.fixture(autouse=True)
 def no_live_model(tmp_path, monkeypatch):
-    # Belt and braces: even a create_app() call that forgets model=None must not
-    # find a key. The .env loader is pointed at a file that does not exist.
+    # Prevent accidental live calls even when a test omits model=None.
     monkeypatch.setenv("POLICY_UPDATE_ENV_FILE", str(tmp_path / "absent.env"))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("AGENT_LOOP", raising=False)
-    # No background worker thread: tests drive app.state.worker deterministically
-    # (helpers.run / helpers.drain). A test of the embedded thread opts in explicitly.
+    # Tests drive the worker explicitly; the embedded-thread test opts in separately.
     monkeypatch.setenv("WORKER_MODE", "external")
 
 
@@ -22,8 +20,7 @@ def no_live_model(tmp_path, monkeypatch):
 def app(tmp_path):
     # Every test gets fresh guests. No database cleanup or shared-data deletion is needed.
     url = os.environ.get("TEST_DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
-    # model=None: never load .env or call a hosted model from the suite. Extraction
-    # tests build their own app around a scripted FakeModel.
+    # Extraction tests override this fixture with a scripted model.
     return create_app(url, model=None)
 
 

@@ -15,6 +15,7 @@ dependencies = [
   "langgraph>=1,<2",
   "langgraph-checkpoint-sqlite>=2,<4",
   "langgraph-checkpoint-postgres>=2,<4",
+  "alembic>=1.16,<2",
 ]
 
 [dependency-groups]

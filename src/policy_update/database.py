@@ -1,17 +1,23 @@
-from sqlalchemy import create_engine, event, inspect, text
+import os
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from policy_update.models import Base
-
 
 def make_database(url: str):
+    url = normalize_url(url)
     options = {}
     if url.startswith("sqlite"):
         options["connect_args"] = {"check_same_thread": False, "timeout": 15}
         if url.endswith(":memory:"):
             options["poolclass"] = StaticPool
-    engine = create_engine(url, **options)
+    engine = create_engine(url, hide_parameters=True, pool_pre_ping=True, **options)
     if engine.dialect.name == "sqlite":
 
         @event.listens_for(engine, "connect")
@@ -23,27 +29,38 @@ def make_database(url: str):
     return engine, sessionmaker(engine, expire_on_commit=False)
 
 
-def initialize_database(engine):
-    # Bootstrap only. Replace with versioned migrations before deploying shared data.
-    Base.metadata.create_all(engine)
-    add_missing_columns(engine)
+def normalize_url(url: str) -> str:
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix) :]
+    return url
 
 
-def add_missing_columns(engine):
-    """Add nullable columns and indexes that a table created by an earlier bootstrap
-    lacks, so a local database file keeps working across schema additions without
-    being reset. Nullable additions only: anything else needs a real migration (V05).
-    Run it from one process at a time (the API owns bootstrap; the worker waits)."""
-    inspector = inspect(engine)
+def migration_config(connection=None):
+    config = Config()
+    config.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
+    config.attributes["connection"] = connection
+    return config
+
+
+def upgrade_database(engine):
+    """Explicit migration entry point. Never prints connection strings or data."""
     with engine.begin() as connection:
-        for table in Base.metadata.sorted_tables:
-            existing = {column["name"] for column in inspector.get_columns(table.name)}
-            for column in table.columns:
-                if column.name in existing or not column.nullable:
-                    continue
-                column_type = column.type.compile(engine.dialect)
-                connection.execute(
-                    text(f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {column_type}')
-                )
-            for index in table.indexes:
-                index.create(connection, checkfirst=True)
+        command.upgrade(migration_config(connection), "head")
+
+
+def require_current_schema(engine):
+    with engine.connect() as connection:
+        current = MigrationContext.configure(connection).get_current_heads()
+    expected = tuple(ScriptDirectory.from_config(migration_config()).get_heads())
+    if current != expected:
+        raise RuntimeError("Database upgrade required: run python -m policy_update.migrate")
+
+
+def initialize_database(engine):
+    # Only new local databases auto-migrate; existing schemas require explicit maintenance.
+    if os.environ.get("SCHEMA_MODE", "local") == "local" and not inspect(engine).has_table(
+        "workspaces"
+    ):
+        upgrade_database(engine)
+    require_current_schema(engine)

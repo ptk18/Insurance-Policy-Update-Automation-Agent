@@ -2,7 +2,7 @@
   --page: #f7f8f5;
   --surface: #fff;
   --ink: #243730;
-  --muted: #66756e;
+  --muted: #5d6c64;
   --border: #e2e7e1;
   --primary: #24674f;
   --primary-hover: #194f3c;
@@ -657,7 +657,7 @@ main {
   padding: 3px 6px;
   border-radius: 4px;
   letter-spacing: 0.7px;
-  color: #67795d;
+  color: var(--muted);
 }
 .evidence-card > strong {
   font-size: 12px;

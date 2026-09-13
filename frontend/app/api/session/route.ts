@@ -21,7 +21,9 @@ export async function POST(request: Request) {
     jar.set(SESSION, data.token, {
       httpOnly: true,
       sameSite: "strict",
-      secure: new URL(request.url).protocol === "https:",
+      secure:
+        process.env.COOKIE_SECURE === "true" ||
+        new URL(request.url).protocol === "https:",
       path: "/",
       maxAge: 60 * 60 * 24 * 7,
     });
