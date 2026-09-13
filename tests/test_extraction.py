@@ -8,7 +8,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import FakeModel, action, answer, submit
+from helpers import FakeModel, action, answer, run, submit
 from policy_update.api import create_app
 from policy_update.extraction import DEFAULT_MODEL, GeminiClient, ModelError, model_from_env
 from policy_update.settings import load_env_file
@@ -182,16 +182,20 @@ def test_model_failure_keeps_intake_retryable(client, guest, fake):
     )
     created = client.post("/cases", headers=guest, json=free_text())
     assert created.status_code == 201
-    path = f"/cases/{created.json()['id']}"
-    assert client.post(path + "/process", headers=guest).status_code == 503
-    assert client.post(path + "/process", headers=guest).status_code == 502
-    case = client.get(path, headers=guest).json()
+    case_id = created.json()["id"]
+    # The worker records each model outage on the job: 503 retryable, 502 not.
+    case = run(client, guest, case_id)
+    assert case["job"]["status"] == "failed" and case["job"]["retryable"] is True
+    assert "HTTP 503" in case["job"]["last_error"]
+    case = run(client, guest, case_id)
+    assert case["job"]["status"] == "failed" and case["job"]["retryable"] is False
+    assert case["job"]["last_error"].startswith("Request extraction failed")
+    assert "HTTP 401" in case["job"]["last_error"]
     assert case["status"] == "received"
     assert case["current_version"] == 0
     assert events(case, "request_extracted") == []
-    processed = client.post(path + "/process", headers=guest)
-    assert processed.status_code == 200
-    assert processed.json()["status"] == "awaiting_approval"
+    processed = run(client, guest, case_id)
+    assert processed["status"] == "awaiting_approval"
     assert len(fake.calls) == 3
 
 

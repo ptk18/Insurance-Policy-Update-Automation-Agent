@@ -8,7 +8,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import FakeChat, FakeModel, action, answer, call, stop
+from helpers import FakeChat, FakeModel, action, answer, call, run, stop
 from policy_update.api import create_app
 from policy_update.extraction import ModelError
 
@@ -39,16 +39,16 @@ def intake(client, guest, **overrides):
     return response.json()["id"]
 
 
-def process(client, guest, case_id, expected=200):
-    response = client.post(f"/cases/{case_id}/process", headers=guest)
-    assert response.status_code == expected, response.text
-    return response.json()
+def process(client, guest, case_id, expected=202):
+    return run(client, guest, case_id, "process", expected)
 
 
-def resume(client, guest, case_id, expected=200):
-    response = client.post(f"/cases/{case_id}/resume", headers=guest)
-    assert response.status_code == expected, response.text
-    return response.json()
+def resume(client, guest, case_id, expected=202):
+    return run(client, guest, case_id, "resume", expected)
+
+
+def retry(client, guest, case_id, expected=202):
+    return run(client, guest, case_id, "retry", expected)
 
 
 def events(case, name):
@@ -110,6 +110,7 @@ def test_agent_selects_tools_waits_for_human_approval_and_applies(client, guest,
         "Inspect the proof.",
     ]
     assert events(case, "processing_started")[0]["details"] == {"mode": "agent"}
+    assert events(case, "processing_queued")[0]["details"] == {"action": "process", "retry": False}
     assert events(case, "proposal_validated")[0]["details"]["source"] == "agent_tool"
 
     # Approval is a human action; resuming before it is refused.
@@ -216,13 +217,11 @@ def test_model_failure_keeps_the_case_processing_and_continues_from_checkpoint(c
         ModelError("Model request returned HTTP 503", retryable=True),
     ]
     case_id = intake(client, guest)
-    failed = process(client, guest, case_id, expected=503)
-    assert "retried" in failed["detail"]
-    case = client.get(f"/cases/{case_id}", headers=guest).json()
+    case = process(client, guest, case_id)
     assert case["status"] == "processing"
     assert len(events(case, "tool_called")) == 1
     assert case["job"]["status"] == "failed" and case["job"]["retryable"] is True
-    assert case["job"]["last_error"] == "The hosted model is unavailable; processing can be retried"
+    assert "HTTP 503" in case["job"]["last_error"]
     assert events(case, "processing_failed")[0]["details"]["attempt"] == 1
     assert client.get("/cases", headers=guest).json()[0]["job_status"] == "failed"
     # A resume makes no sense here; the API points at the right recovery action.
@@ -231,15 +230,16 @@ def test_model_failure_keeps_the_case_processing_and_continues_from_checkpoint(c
     )
 
     chat.decisions += [call("submit_for_approval", changes={"email": "sam.new@example.com"})]
-    case = client.post(f"/cases/{case_id}/retry", headers=guest).json()
+    case = retry(client, guest, case_id)
     assert case["status"] == "awaiting_approval"
     assert case["job"] == {
-        **{key: case["job"][key] for key in ("started_at", "updated_at")},
+        **{key: case["job"][key] for key in ("started_at", "updated_at", "queued_at", "worker_id")},
         "action": "continue",
         "status": "waiting",
         "attempts": 2,
         "retryable": False,
         "last_error": None,
+        "lease_expires_at": None,
     }
     # The first step was not repeated: the loop continued from its checkpoint.
     assert [e["details"]["tool"] for e in events(case, "tool_called")] == [
@@ -247,6 +247,32 @@ def test_model_failure_keeps_the_case_processing_and_continues_from_checkpoint(c
         "submit_for_approval",
     ]
     assert chat.prompts[-1]["messages"][-2]["name"] == "get_policy"
+
+
+@pytest.mark.parametrize(
+    ("detail", "retryable", "visible"),
+    [
+        ("Model request returned HTTP 429 RESOURCE_EXHAUSTED", True, "HTTP 429 RESOURCE_EXHAUSTED"),
+        ("Model request returned HTTP 401 UNAUTHENTICATED", False, "HTTP 401 UNAUTHENTICATED"),
+        ("Model request failed: ReadTimeout", True, "ReadTimeout"),
+        ("Model request returned HTTP 503 PRIVATE_PROVIDER_TEXT", True, "HTTP 503"),
+        ("private-provider-text request or credential", True, "Model request failed"),
+    ],
+)
+def test_model_error_category_is_visible_without_provider_text(
+    client, guest, chat, detail, retryable, visible
+):
+    chat.decisions.append(ModelError(detail, retryable=retryable))
+    case_id = intake(client, guest)
+    case = process(client, guest, case_id)
+    assert case["status"] == "processing" and case["current_version"] == 0
+    assert case["job"]["status"] == "failed"
+    assert case["job"]["retryable"] is retryable
+    message = case["job"]["last_error"]
+    assert visible in message
+    assert "private_provider_text" not in message.lower()
+    assert "private-provider-text" not in message
+    assert events(case, "processing_failed")[0]["details"]["error"] == message
 
 
 def test_interrupted_loop_survives_an_app_restart(tmp_path):
@@ -307,8 +333,9 @@ def test_extraction_feeds_the_loop_without_creating_a_proposal(tmp_path, chat):
     snapshot = json.loads(chat.prompts[0]["messages"][-1]["text"].split("(JSON): ", 1)[1])
     assert snapshot["extraction_notes"]["unsupported"] == ["increase coverage"]
     assert snapshot["requested_changes"] == {"email": "sam.taylor@example.net"}
-    assert [e["action"] for e in case["timeline"]][:3] == [
+    assert [e["action"] for e in case["timeline"]][:4] == [
         "case_created",
+        "processing_queued",
         "request_extracted",
         "processing_started",
     ]
@@ -319,7 +346,8 @@ def test_stalled_running_job_is_refused_until_retried(app, client, guest, chat):
 
     chat.decisions += [call("submit_for_approval", changes={"email": "sam.new@example.com"})]
     case_id = intake(client, guest)
-    # Simulate a process that died mid-run: the job row still says running.
+    # Simulate a worker that died mid-run: the job still says running, but nobody
+    # renews its lease.
     with app.state.sessions.begin() as session:
         workspace_id = session.get(Case, case_id).workspace_id
         session.add(
@@ -329,15 +357,18 @@ def test_stalled_running_job_is_refused_until_retried(app, client, guest, chat):
                 action="process",
                 status="running",
                 attempts=1,
+                worker_id="host:1:dead",
+                lease_expires_at="2000-01-01T00:00:00+00:00",
             )
         )
     refused = client.post(f"/cases/{case_id}/process", headers=guest)
-    assert refused.status_code == 409 and "retry" in refused.json()["detail"]
-    case = client.post(f"/cases/{case_id}/retry", headers=guest).json()
+    assert refused.status_code == 409 and "stalled; use /retry" in refused.json()["detail"]
+    assert client.get("/cases", headers=guest).json()[0]["job_status"] == "running"
+    case = retry(client, guest, case_id)
     assert case["status"] == "awaiting_approval"
     assert case["job"]["attempts"] == 2 and case["job"]["status"] == "waiting"
     assert action(client, guest, case, "approve").status_code == 200
     chat.decisions += [call("apply_approved_update", version=1)]
-    case = client.post(f"/cases/{case_id}/retry", headers=guest).json()
+    case = retry(client, guest, case_id)
     assert case["status"] == "completed" and case["job"]["status"] == "completed"
     assert case["job"]["action"] == "resume"

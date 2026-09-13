@@ -81,6 +81,45 @@ class ModelError(Exception):
         self.detail = detail
         self.retryable = retryable
 
+    @property
+    def public_detail(self) -> str:
+        """Expose useful failure categories without copying arbitrary provider text."""
+        match = re.fullmatch(
+            r"Model request returned HTTP ([1-5][0-9]{2})(?: ([A-Z_]+))?", self.detail
+        )
+        if match:
+            code, status = match.groups()
+            known_statuses = {
+                "RESOURCE_EXHAUSTED",
+                "UNAVAILABLE",
+                "INTERNAL",
+                "DEADLINE_EXCEEDED",
+                "UNAUTHENTICATED",
+                "PERMISSION_DENIED",
+                "INVALID_ARGUMENT",
+                "NOT_FOUND",
+                "FAILED_PRECONDITION",
+                "ABORTED",
+                "CANCELLED",
+                "UNKNOWN",
+            }
+            suffix = f" {status}" if status in known_statuses else ""
+            return f"Model request returned HTTP {code}{suffix}"
+        safe_messages = {
+            "Model request failed: ReadTimeout",
+            "Model request failed: ConnectTimeout",
+            "Model request failed: WriteTimeout",
+            "Model request failed: PoolTimeout",
+            "Model request failed: ConnectError",
+            "Model request failed: ReadError",
+            "Model returned an unparseable answer",
+            "Model returned non-object tool arguments",
+            "The model returned a non-object answer",
+            "Model stopped early: MAX_TOKENS",
+            "Model stopped early: SAFETY",
+        }
+        return self.detail if self.detail in safe_messages else "Model request failed"
+
 
 @dataclass
 class ModelResponse:

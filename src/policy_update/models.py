@@ -89,20 +89,28 @@ class Attachment(Base):
 
 
 class ProcessingJob(Base):
-    """One durable record per case of the latest processing/resume attempt, so a
-    temporary failure is visible and retryable after the request or process is gone."""
+    """One durable record per case: the queue entry a worker claims and the record of
+    the latest attempt, so a temporary failure is visible and retryable after the
+    request or process is gone.
+
+    ``status`` is ``queued`` (waiting for a worker), ``running`` (claimed; the claim is
+    valid until ``lease_expires_at`` and renewed while the worker is alive),
+    ``waiting`` (the case paused for a human), ``completed``, or ``failed``."""
 
     __tablename__ = "processing_jobs"
 
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), primary_key=True)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     action: Mapped[str]
-    status: Mapped[str]
+    status: Mapped[str] = mapped_column(index=True)
     attempts: Mapped[int] = mapped_column(default=0)
     retryable: Mapped[bool] = mapped_column(default=False)
     last_error: Mapped[str | None]
     started_at: Mapped[str] = mapped_column(default=now)
     updated_at: Mapped[str] = mapped_column(default=now)
+    queued_at: Mapped[str | None]
+    worker_id: Mapped[str | None]
+    lease_expires_at: Mapped[str | None]
 
 
 class Proposal(Base):

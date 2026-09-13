@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import action, policy, submit
+from helpers import action, policy, run, submit
 from policy_update.api import create_app
 
 
@@ -92,7 +92,7 @@ def test_uploaded_pdf_is_inspected_with_page_reference_and_supports_execution(
     meta = client.get(f"/cases/{case['id']}/attachments/{attachment['id']}", headers=guest)
     assert meta.json()["sha256"] == attachment["sha256"]
 
-    processed = client.post(f"/cases/{case['id']}/process", headers=guest).json()
+    processed = run(client, guest, case["id"])
     assert processed["status"] == "awaiting_approval"
     assert processed["proposals"][0]["evidence"]["source"]["page"] == 2
     assert action(client, guest, case, "approve").status_code == 200
@@ -116,7 +116,7 @@ def test_unresolved_document_blocks_and_corrected_upload_resumes(
     case = intake(client, guest, address)
     first = upload(client, guest, case["id"], sample(client, guest, document_id)).json()
     assert first["inspection"]["readable"] is readable
-    processed = client.post(f"/cases/{case['id']}/process", headers=guest).json()
+    processed = run(client, guest, case["id"])
     assert processed["status"] == "awaiting_information"
     findings = {item["code"]: item["message"] for item in processed["proposals"][0]["findings"]}
     assert finding in findings
@@ -150,7 +150,7 @@ def test_embedded_document_instructions_only_yield_labeled_fields(client, guest,
     attachment = upload(client, guest, case["id"], sample(client, guest, "injection-pdf")).json()
     assert attachment["inspection"]["certain"]
     assert "SYSTEM" not in str(attachment["inspection"])
-    processed = client.post(f"/cases/{case['id']}/process", headers=guest).json()
+    processed = run(client, guest, case["id"])
     assert processed["status"] == "awaiting_approval"
     assert action(client, guest, case, "execute").status_code == 409
     assert (
@@ -225,5 +225,5 @@ def test_attachment_and_binding_survive_restart(tmp_path, address):
             f"/cases/{case['id']}/attachments/{attachment['id']}/content", headers=guest
         )
         assert content.content == pdf
-        processed = second.post(f"/cases/{case['id']}/process", headers=guest).json()
+        processed = run(second, guest, case["id"])
         assert processed["status"] == "awaiting_approval"

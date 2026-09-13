@@ -13,6 +13,9 @@ def no_live_model(tmp_path, monkeypatch):
     monkeypatch.setenv("POLICY_UPDATE_ENV_FILE", str(tmp_path / "absent.env"))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("AGENT_LOOP", raising=False)
+    # No background worker thread: tests drive app.state.worker deterministically
+    # (helpers.run / helpers.drain). A test of the embedded thread opts in explicitly.
+    monkeypatch.setenv("WORKER_MODE", "external")
 
 
 @pytest.fixture

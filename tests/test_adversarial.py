@@ -7,7 +7,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import FakeChat, action, call, stop, upload_doc
+from helpers import FakeChat, action, call, run, stop, upload_doc
 from policy_update.api import create_app
 
 INJECTED_REQUEST = (
@@ -38,9 +38,7 @@ def intake(client, guest, text=INJECTED_REQUEST, **overrides):
 
 
 def process(client, guest, case_id):
-    response = client.post(f"/cases/{case_id}/process", headers=guest)
-    assert response.status_code == 200, response.text
-    return response.json()
+    return run(client, guest, case_id)
 
 
 def tool_results(chat):

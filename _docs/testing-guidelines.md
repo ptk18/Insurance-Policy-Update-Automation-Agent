@@ -1,6 +1,6 @@
 # Testing guidelines and coverage inventory
 
-Last inspected: 2026-09-12. Read this file before adding or changing tests.
+Last inspected: 2026-09-12 (A05 worker). Read this file before adding or changing tests.
 Delivery tasks are tracked in [process.md](process.md); acceptance criterion numbers
 below refer to [plan.md](plan.md).
 
@@ -10,28 +10,42 @@ below refer to [plan.md](plan.md).
 [test_attachments.py](../tests/test_attachments.py) (7 functions / 11 cases),
 [test_extraction.py](../tests/test_extraction.py) (12 functions / 20 cases),
 [test_tools.py](../tests/test_tools.py) (9 functions / 9 cases),
-[test_agent.py](../tests/test_agent.py) (10 functions / 10 cases), and
+[test_agent.py](../tests/test_agent.py) (11 functions / 15 cases),
+[test_worker.py](../tests/test_worker.py) (9 functions / 9 cases), and
 [test_adversarial.py](../tests/test_adversarial.py) (4 functions / 4 cases) total
-**64 test functions, producing 83 cases after parameterization**. They exercise the
+**74 test functions, producing 97 cases after parameterization**. They exercise the
 FastAPI API with a real SQLAlchemy database through TestClient. Hosted-model
 behavior is covered only through scripted fakes and a mocked HTTP transport; there
-are no live-model, frontend, LangGraph, or image-inspection tests. This is a
-behavior inventory, not a measured line/branch coverage report.
+are no live-model or image-inspection tests in that Python inventory. A separate
+frontend browser suite is described below. This is a behavior
+inventory, not a measured line/branch coverage report.
 
-The A06/A08 session (2026-09-12) ran all 83 cases on SQLite and on a dedicated
-local PostgreSQL test database (which also exercises the PostgreSQL checkpointer),
-plus lint/format checks, the live demo in agent mode, and the live synthetic
-evaluation (7/7 on `gemini-3.5-flash-lite`). CI is configured, but a hosted run has not
+The A05 worker session (2026-09-12) ran all 92 cases on SQLite and on a dedicated
+local PostgreSQL test database (which also exercises the PostgreSQL checkpointer
+and row locks), plus lint/format checks and the demo in both worker modes without
+a model key. The live agent-mode demo and the synthetic evaluation (7/7 on
+`gemini-3.5-flash-lite`) date from the A06/A08 session earlier that day and were
+not repeated after the worker change. CI is configured, but a hosted run has not
 been verified.
 
-[helpers.py](../tests/helpers.py) provides `submit` (intake expecting `received`,
-then `POST /cases/{id}/process`), `action`, `policy`, `upload_doc`, and
-`FakeModel`/`answer` (a scripted extraction model) and `FakeChat`/`call`/`stop` (a
-scripted tool-selection model that keeps every prompt it saw); unscripted calls
-fail loudly. An autouse fixture points `.env` loading at a missing file and clears
-`GEMINI_API_KEY`, so even a bare `create_app()` in a test cannot go live. `conftest.py` builds the app with `model=None`, so the suite
-never loads `.env` or calls a hosted model; extraction tests override `app` with a
-`FakeModel`. Use `submit` unless a test is about the intake/processing boundary.
+The model-error reporting fix (2026-09-12) adds five regression cases and verifies
+the agent, extraction, and worker modules with fakes on SQLite. It makes no live
+model call; the historical generic error cannot reveal the provider's original
+HTTP status. Existing full-suite/PostgreSQL results above predate this fix.
+
+[helpers.py](../tests/helpers.py) provides `run` (queue `process`/`resume`/`retry`
+for a case expecting `202`, run the app's worker inline with `drain`, and return the
+stored case), `submit` (intake expecting `received`, then `run`), `drain`, `action`,
+`policy`, `upload_doc`, and `FakeModel`/`answer` (a scripted extraction model) and
+`FakeChat`/`call`/`stop` (a scripted tool-selection model that keeps every prompt
+it saw; a queued callable runs as a hook between decisions); unscripted calls fail
+loudly. An autouse fixture points `.env` loading at a missing file, clears
+`GEMINI_API_KEY`, and sets `WORKER_MODE=external`, so even a bare `create_app()` in
+a test cannot go live or start a background worker thread; tests drive
+`app.state.worker` themselves and stay deterministic. `conftest.py` builds the app
+with `model=None`, so the suite never loads `.env` or calls a hosted model;
+extraction tests override `app` with a `FakeModel`. Use `submit` unless a test is
+about the intake/queue/worker boundary.
 `test_attachments.py` adds local `sample`, `upload`, `reply_with`, and `intake`
 helpers.
 
@@ -47,12 +61,18 @@ the commands below. Extend an existing scenario when it already owns the behavio
 - `test_intake_is_persisted_before_processing` — **1 case.** Intake returns a
   `received` case with version 0, no proposals, stored `requested_changes`, and a
   `case_created` event; it appears in the list. Approve, execute, reject, reply, and
-  edit all return 409 before processing. Processing yields `awaiting_approval` with
-  the stored changes and a `proposal_validated` event; a second process call is 409.
+  edit all return 409 before processing. `/process` answers 202 with the case still
+  `received` and its job `queued` (no worker yet); a second call while queued is
+  409; one worker pass runs exactly that job and yields `awaiting_approval` with
+  the stored changes, `processing_queued`/`proposal_validated`/`processing_finished`
+  events, and a `waiting` job owned by the app's worker; a later process call is
+  409 and a further worker pass runs nothing.
 - `test_processing_failure_keeps_intake_retryable` — **1 case.** Injects an
-  exception in validation during `/process`. The request fails with 500, the case
-  stays `received` with no proposal and its requested changes intact, and a retry
-  processes it normally. This is a request-level failure, not a worker crash.
+  exception in validation while the worker runs the job. Queueing succeeded (202);
+  the case stays `received` with no proposal and its requested changes intact; the
+  job is `failed`/retryable with `processing_failed`; a retry processes it
+  normally with `attempts` 2. This is a crash inside the worker's attempt, not a
+  killed worker (see test_worker.py for lapsed leases).
 - `test_intake_without_changes_pauses_until_reviewer_supplies_them` — **1 case.**
   Intake without `changes` processes to `awaiting_information` with only a
   `missing_changes` finding, empty proposal changes, and a draft; approval fails.
@@ -253,8 +273,15 @@ that scripts the model's tool choices.
   and a mismatching policy number come back as structured errors the model sees;
   nothing is approved or executable.
 - `test_model_failure_keeps_the_case_processing_and_continues_from_checkpoint` — a
-  retryable model error after step 1 answers 503 and leaves `processing`; the next
-  `/process` continues at step 2 without repeating step 1.
+  retryable model error after step 1 fails the job (retryable, `processing_failed`)
+  and leaves `processing`; `/resume` is refused with a `/retry` hint; `/retry`
+  continues at step 2 without repeating step 1 and the job shows attempt 2. The
+  saved error retains HTTP 503 instead of replacing it with a generic outage.
+- `test_model_error_category_is_visible_without_provider_text` — **5 cases:**
+  quota (429/RESOURCE_EXHAUSTED), authentication (401/UNAUTHENTICATED), read timeout,
+  an unknown provider status, and arbitrary provider text. The job and failure
+  audit retain only allowed diagnostic categories, preserve retryability, and
+  expose no arbitrary provider text. No proposal is created.
 - `test_interrupted_loop_survives_an_app_restart` — a new app instance over the same
   SQLite file resumes the interrupted thread after approval.
 - `test_other_guests_cannot_process_or_resume_the_case` — 404 for another guest,
@@ -263,10 +290,10 @@ that scripts the model's tool choices.
   extracted into `requested_changes`/`policy_number` and shown to the model with
   the extraction notes; only the model's tool creates version 1, and that first
   proposal still pauses on the extraction's unsupported item.
-- `test_stalled_running_job_is_refused_until_retried` — a job left `running` by a
-  dead process makes `/process` answer 409; `/retry` runs the attempt, and a later
-  `/retry` after approval resumes and completes. The crash-continue test above also
-  asserts the failed job record, `processing_failed`, and the `/retry` path.
+- `test_stalled_running_job_is_refused_until_retried` — a job left `running` with
+  a lapsed lease makes `/process` answer 409 ("stalled; use /retry"); `/retry`
+  queues and runs the attempt, and a later `/retry` after approval resumes and
+  completes. The automatic sweep of the same situation is in test_worker.py.
 
 ### Adversarial runs — criteria 6, 9, 11, 12 (A08)
 
@@ -285,6 +312,52 @@ as if steered by injected text.
   confirmation all fail without side effects.
 - `test_agent_cannot_reach_another_workspace_even_with_its_case_id`.
 
+### Job worker: claiming, leases, and stalled-job recovery — criteria 8, 10 (A05)
+
+All in [test_worker.py](../tests/test_worker.py); agent-mode with `FakeChat`
+unless noted.
+
+- `test_exactly_one_worker_claims_a_queued_job` — two `Worker` objects over one
+  database: the first claim wins, the second returns false and finds nothing to
+  run; the running job shows the owner and a lease later than `started_at`;
+  `/retry` is refused while the lease is live; the owner finishes it (`waiting`,
+  lease cleared) and a non-owner's `finish_job` raises `LeaseLost`.
+- `test_stalled_job_is_swept_back_to_the_queue_and_run_by_a_live_worker` — a
+  `running` job whose lease lapsed (dead worker) is re-queued by the next worker
+  pass (`processing_stalled` with the attempt number) and run to
+  `awaiting_approval` as attempt 2 by the live worker.
+- `test_job_that_keeps_stalling_fails_for_manual_retry` — a job that already
+  stalled `MAX_JOB_ATTEMPTS` times is failed (retryable, explanatory
+  `last_error`) instead of re-queued; `/retry` still queues and completes it.
+- `test_worker_that_lost_its_lease_stops_before_acting_again` — a `FakeChat` hook
+  hands the job to another worker mid-run: the first worker's next step raises
+  `LeaseLost` before the second tool runs, records no decision, and leaves the
+  job untouched; when the new owner's lease lapses too, the sweep re-queues it and
+  the loop continues from the checkpoint (no repeated `get_policy`).
+- `test_heartbeat_renews_the_lease_while_a_step_is_slow` — a one-second lease
+  and a scripted decision that sleeps longer than it: the heartbeat thread has
+  advanced `lease_expires_at`, a concurrent sweep finds nothing stalled, and the
+  job finishes as attempt 1 under its original owner.
+- `test_requeued_attempt_runs_what_the_case_needs_now` — a job left `running`
+  after its run had fully committed is closed as `waiting` without a second
+  proposal or a failure; a resume whose first model call failed (interrupt already
+  consumed) is swept and *continued* to completion rather than refused as "not
+  waiting to be resumed".
+- `test_embedded_worker_thread_runs_jobs_outside_the_request` —
+  `worker_mode="embedded"`: `/process` returns a queued job and the background
+  thread finishes it; approval plus `/resume` completes the case; shutdown joins
+  the thread. The only test that runs a worker thread.
+- `test_separate_worker_process_runs_queued_jobs` — rule-based (no key): a real
+  `python -m policy_update.worker` subprocess over the same database claims and
+  runs a queued job while the API only queues (`/health` reports `external`); the
+  job's `worker_id` carries the subprocess PID; SIGTERM exits 0; the log never
+  contains the request text or the token. Run 15× in a row without a failure
+  after the worker stopped bootstrapping the schema itself (the API owns it; the
+  worker waits for the tables).
+- `test_bootstrap_adds_columns_missing_from_an_older_database` — drops
+  `processing_jobs.lease_expires_at`, re-runs `initialize_database`, and the column
+  is back; a second bootstrap is a no-op.
+
 ### Persistence, concurrency, and failure recovery — criteria 8, 9, 10
 
 `test_intake_is_persisted_before_processing` and
@@ -298,7 +371,9 @@ the retry.
   completed stages: the unprocessed intake is processed by a second instance, the
   token remains usable, and execution replay preserves the receipt/revision. This
   is app recreation, not a killed worker or PostgreSQL server restart;
-  awaiting-information and LangGraph are not exercised.
+  awaiting-information and LangGraph are not exercised. Killing the embedded
+  worker thread mid-run is not simulated; the lapsed-lease tests above stand in
+  for a dead worker.
 - `test_failure_between_policy_write_and_audit_rolls_back` — **1 case.** Injects an
   exception at the update-audit call after the policy flush. The API fails, policy
   values and approval state remain intact, no confirmation appears, and retry
@@ -329,9 +404,10 @@ authenticity.
 
 [scripts/demo.py](../scripts/demo.py) uses a running local server to exercise
 contact-only, missing evidence/correction, and conflicting evidence/correction.
-Each scenario submits intake, processes it, approves through the API, and checks
-duplicate execution; a fourth scenario uploads a conflicting PDF, then a corrected
-PDF bound by a reply. This is a
+Each scenario submits intake, queues processing and polls the job until the
+worker finishes, approves through the API, and checks duplicate execution; a
+fourth scenario uploads a conflicting PDF, then a corrected PDF bound by a reply.
+This is a
 manual smoke companion, not pytest, browser automation, or an autonomous agent.
 It creates synthetic records and performs simulated approvals/updates.
 
@@ -348,6 +424,7 @@ uv run pytest -q --tb=short tests/test_attachments.py
 uv run pytest -q --tb=short tests/test_extraction.py
 uv run pytest -q --tb=short tests/test_tools.py
 uv run pytest -q --tb=short tests/test_agent.py
+uv run pytest -q --tb=short tests/test_worker.py
 uv run pytest -q --tb=short tests/test_adversarial.py
 uv run pytest -q --tb=short -k 'evidence or contact or policy'
 uv run pytest -q --tb=short -k 'approval or stale or rejection'
@@ -419,16 +496,79 @@ not been selected or installed yet.
   previous proposal's changes), recording failed extraction attempts, and a
   separately labeled live evaluation of grounding on synthetic adversarial text
   (V09/A08). Grounding itself is covered above with fakes.
-- [ ] A05 worker: a separate worker process, stale-job detection, and concurrent
-  `/process` calls on one case (guarded by the in-process lock and the job's
-  `running` marker, exercised only sequentially). The live evaluation covers seven
-  texts on one model; a broader corpus or other providers are not measured. Intake/processing separation
-  itself is covered above (B13).
-- [ ] U01–U07: browser session isolation, actual review/approval flows, stale-state
-  feedback, draft labeling, accessible interactions, and visual regression checks.
+- [ ] A05 follow-ups: a worker killed mid-step is simulated by a lapsed lease, not
+  by killing a process; two worker processes racing on one queue are exercised as
+  two `Worker` objects in one process (same compare-and-set) in the suite — a
+  manual 20-job race between two real processes on PostgreSQL ran clean
+  (2026-09-12) but is not a test. The sweeper-versus-owner lock order is proved
+  by a manual PostgreSQL probe, not by the suite (SQLite has no row locks). The live evaluation covers seven texts on one model; a broader corpus
+  or other providers are not measured.
+- [ ] U07 follow-ups: live-agent browser flow, Safari/Firefox, screen-reader and
+  formal contrast checks, slow-network and large-queue behavior, and automatic
+  visual differences. Core Chromium browser coverage is listed below.
 - [ ] V05–V08: migrations with retained records, guest expiry/limits/cleanup,
-  private storage configuration, worker/host restart, and hosted smoke checks.
+  private storage configuration, host restart, and hosted smoke checks.
 - [ ] V09: separately measured synthetic model extraction and end-to-end outcomes.
 
 These gaps are not a request to write speculative tests before their feature
 exists. Add coverage alongside the behavior or when a concrete risk is investigated.
+
+
+## Dashboard browser coverage — U01–U07
+
+[dashboard.spec.ts](../frontend/tests/dashboard.spec.ts) contains **9 Chromium
+scenarios** (including two evidence variants) separate from the Python inventory:
+
+1. Guest entry, sample contact intake, comparison, separate version-bound approval
+   and application, confirmation draft, persisted update activity, and reload.
+2. Missing evidence blocks approval of the whole request; corrected PDF/reply
+   creates version 2 with a page reference and authenticated download.
+3. Conflicting evidence follows the same correction path.
+4. Editing after approval invalidates it; an intervening API edit causes a stale
+   dialog submission to fail while retaining input; refresh permits fresh review.
+5. Rejection records its reason and removes approval actions.
+6. HttpOnly/Strict cookie, separate guest contexts, cross-workspace 404, and
+   cross-origin write rejection through the Next.js proxy.
+7. Unassigned broker reaches Access blocked without current contact values or
+   approval controls.
+8. Narrow viewport has no horizontal document overflow; keyboard tabs and dialog
+   escape/focus restoration work; a mocked approval-service outage stays an error,
+   never an applied update.
+9. A scripted extraction 429 is persisted on the real job, displayed with safe
+   detail, and retried through the UI to a pending proposal on attempt 2.
+
+The test server [serve_backend.py](../frontend/tests/serve_backend.py) uses a fresh
+TemporaryDirectory SQLite database, explicit scripted extraction fake, no agent
+model, and an embedded worker. Unexpected model inputs fail loudly. It does not
+load `.env`, use live Gemini, or touch the normal `policy_demo.db`. Playwright
+starts ports **8001/3001** and refuses to reuse existing servers. Its browser
+contexts are isolated from the user's browser. Build before testing:
+
+```sh
+uv sync --locked
+cd frontend
+npm ci
+npx playwright install chromium
+npm run format:check
+npm run typecheck
+npm run build
+npm test
+```
+
+To intentionally regenerate reference screenshots, use
+`CAPTURE_BASELINE=1 npm test` (or `env CAPTURE_BASELINE=1 npm test` in fish).
+Images go to `_docs/screenshots/`; viewport/state links are in the
+[design baseline](design-system.md). Review generated images before accepting them.
+The images are reference artifacts, not automatic pixel-comparison assertions.
+
+Local verification on 2026-09-12: production build, TypeScript, and formatting
+passed; **9/9 Chromium scenarios passed**. A new [frontend CI workflow](../.github/workflows/frontend.yml)
+configures the same checks; hosted execution is not yet verified. These checks do
+not establish live-agent behavior, deployed operation, or a complete accessibility
+audit. Existing backend suite results elsewhere in this file are historical and
+were not repeated for this frontend implementation.
+
+
+D003 UI simplification (2026-09-12): updated the existing empty-state assertion
+for “No requests yet” and regenerated the same desktop/mobile reference scenarios.
+No additional test cases or live-model calls were introduced.

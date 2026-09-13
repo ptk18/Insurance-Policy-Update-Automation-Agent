@@ -30,13 +30,17 @@ deterministic PDF text-layer inspection, and a text-only Gemini adapter
 (`GEMINI_API_KEY` loaded from `.env`) that extracts requested changes and pauses
 unsupported or ambiguous requests, typed case-scoped tools, and a bounded LangGraph
 loop in which the model selects tools, pauses on interrupts for replies and human
-approval, resumes from persisted checkpoints, and records every attempt on a
-durable job with a manual retry route. Image/OCR inspection, a separate worker
-process, the Next.js dashboard, and deployment remain pending. Check the
+approval, and resumes from persisted checkpoints. Processing routes only queue a
+durable job (`202`); a worker (embedded thread by default, or a separate
+`python -m policy_update.worker` process) claims it under a renewed lease, runs it
+outside any request, and sweeps stalled jobs back into the queue. Image/OCR
+inspection and deployment remain pending. The Next.js dashboard in `frontend/`
+connects through same-origin route handlers and an HttpOnly guest cookie. Check the
 code before describing a planned feature as implemented, and update the README when
 that status changes. Tests must pass `model=None`/`agent_model=None` or scripted
 fakes (`FakeModel`, `FakeChat`) to `create_app`; never call the hosted model from
-the suite.
+the suite. Tests run with `WORKER_MODE=external` and drive the worker themselves
+(`helpers.run`/`drain`); do not rely on a background thread for determinism.
 
 Do not introduce real insurance records, outbound email, a vector database, model
 training, multi-agent architecture, or a separate planning service for this scope.
@@ -44,6 +48,15 @@ Keep illustrative business rules and synthetic measurements labeled as such.
 
 ## Repository map
 
+- `frontend/app/`: Next.js dashboard entry, shared CSS tokens, guest session routes,
+  and an allowlisted API proxy. `POLICY_API_URL` is server-only; never expose
+  bearer tokens or provider keys to the client.
+- `frontend/components/`: queue/review UI, intake and version-bound action forms,
+  dialogs, notices, and shared status badges; `frontend/lib/types.ts` holds API
+  contracts and the shared case-status vocabulary.
+- `frontend/tests/`: Playwright checks against a temporary SQLite API with a
+  scripted extraction fake and no agent model. Never point browser tests at the
+  user's live model-enabled API. Build first; run with `cd frontend && npm test`.
 - `src/policy_update/api.py`: FastAPI routes, guest authentication, request
   transactions, and error responses.
 - `src/policy_update/service.py`: case lifecycle, authorization, proposal
@@ -61,14 +74,20 @@ Keep illustrative business rules and synthetic measurements labeled as such.
   schemas, the call budget, and `tool_called` auditing. Never add approve/reject/edit
   or anything that takes a bearer token here.
 - `src/policy_update/agent.py`: the LangGraph loop (`decide → act → wait | finish`),
-  interrupts, per-step transactions, checkpointer construction, and the in-process
-  per-case run lock. Mandatory controls belong in tools/service, not here.
+  interrupts, per-step transactions, checkpointer construction, the in-process
+  per-case run lock, and the per-run job-ownership guard. Mandatory controls belong
+  in tools/service, not here.
+- `src/policy_update/worker.py`: the job worker — queue polling, compare-and-set
+  claims, lease heartbeat, stalled-job sweep, one attempt per claimed job, and the
+  `python -m policy_update.worker` entry point. `runtime.py` builds the shared
+  stack (database, models, agent runner, worker) for the API and the worker.
 - `src/policy_update/fixtures.py`: fictional brokers, evidence, sample requests, and
   sample document metadata; `assets/` holds the generated synthetic PDFs/PNG
   (regenerate with `scripts/make_evidence_assets.py`).
 - `tests/`: workflow, isolation, approval, concurrency, recovery, attachment,
-  extraction, tool, agent-loop, and adversarial tests; `tests/helpers.py` holds shared API
-  helpers, `FakeModel`, `FakeChat`, and `upload_doc`.
+  extraction, tool, agent-loop, worker, and adversarial tests; `tests/helpers.py`
+  holds shared API helpers (`run`/`drain` queue a route and run the worker inline),
+  `FakeModel`, `FakeChat`, and `upload_doc`.
 - `scripts/evaluate_model.py`: labeled synthetic live evaluation of the configured
   model against backend invariants; never run it from tests.
 - `scripts/demo.py`: local API scenarios with simulated reviewer approvals; in

@@ -6,9 +6,10 @@ not expose approve/reject or receive the guest's reviewer credential.
 
 import hashlib
 import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from policy_update.documents import inspect_document, safe_filename, sniff_content_type
@@ -83,10 +84,12 @@ def audit(
     )
 
 
-def get_case(session: Session, workspace_id: str, case_id: str) -> Case:
-    case = session.scalar(
-        select(Case).where(Case.id == case_id, Case.workspace_id == workspace_id).with_for_update()
-    )
+def get_case(session: Session, workspace_id: str, case_id: str, lock: bool = True) -> Case:
+    """The case, row-locked for writes by default. Reads that only render the case
+    (polling ``GET /cases/{id}``) pass ``lock=False`` so they never wait behind a
+    worker step that holds the row."""
+    query = select(Case).where(Case.id == case_id, Case.workspace_id == workspace_id)
+    case = session.scalar(query.with_for_update() if lock else query)
     if case is None:
         raise DomainError(404, "Case not found")
     return case
@@ -322,11 +325,13 @@ def extract_into_case(session: Session, case: Case, model: ModelClient):
     except ModelError as error:
         raise DomainError(
             503 if error.retryable else 502,
-            "Request extraction is unavailable; the case is still received and can be "
-            "processed again"
-            if error.retryable
-            else "Request extraction failed; check the model configuration or submit a "
-            "new case with structured changes",
+            f"Request extraction failed: {error.public_detail}. "
+            + (
+                "The case is still received; retry after the provider recovers or quota "
+                "becomes available."
+                if error.retryable
+                else "Check the model configuration or submit a new case with structured changes."
+            ),
         ) from error
     # The policy number is only ever the one stated in the text, never one inferred
     # from the requester's or policyholder's name.
@@ -386,42 +391,122 @@ def begin_agent_processing(session: Session, case: Case, model: ModelClient | No
     session.flush()
 
 
-def start_job(session: Session, case: Case, action: str, retry: bool = False) -> ProcessingJob:
-    """Record an attempt before running it. A job still marked ``running`` is refused
-    unless the caller is an explicit retry, which is how a run whose process died
-    mid-step is recovered."""
+LEASE_LOST = "The job lease is held by another worker"
+
+
+class LeaseLost(DomainError):
+    """Raised inside a running attempt when the job no longer belongs to this worker
+    (its lease expired and another worker claimed it). The attempt stops without
+    touching the job record, which the new owner now controls."""
+
+    def __init__(self):
+        super().__init__(409, LEASE_LOST)
+
+
+def _parse(stamp: str | None) -> datetime | None:
+    return datetime.fromisoformat(stamp) if stamp else None
+
+
+def lease_expired(job: ProcessingJob, at: str | None = None) -> bool:
+    """A ``running`` job whose lease has lapsed: its worker stopped renewing it."""
+    expires = _parse(job.lease_expires_at)
+    return job.status == "running" and (expires is None or expires <= _parse(at or now()))
+
+
+def enqueue_job(session: Session, case: Case, action: str, retry: bool = False) -> ProcessingJob:
+    """Queue one attempt for a worker to claim. A job already queued, or running under
+    a live lease, is refused; a stalled ``running`` job (lease lapsed) is refused too
+    unless the caller is an explicit retry, so the recovery step stays visible."""
     job = session.get(ProcessingJob, case.id, with_for_update=True)
     if job is None:
         job = ProcessingJob(
             case_id=case.id, workspace_id=case.workspace_id, action=action, attempts=0
         )
         session.add(job)
-    elif job.status == "running" and not retry:
-        raise DomainError(409, "This case is already being processed; retry if it stalled")
+    elif job.status == "queued":
+        raise DomainError(409, "This case is already queued for processing")
+    elif job.status == "running":
+        if not lease_expired(job):
+            raise DomainError(409, "This case is being processed; wait for the worker to finish")
+        if not retry:
+            raise DomainError(409, "This case's last run stalled; use /retry to run it again")
     job.action = action
-    job.status = "running"
-    job.attempts += 1
+    job.status = "queued"
+    job.queued_at = now()
+    job.worker_id = None
+    job.lease_expires_at = None
     job.retryable = False
     job.last_error = None
-    job.updated_at = now()
+    job.updated_at = job.queued_at
     session.flush()
+    audit(session, case, "system:job", "processing_queued", {"action": action, "retry": retry})
     return job
 
 
-def finish_job(session: Session, case: Case, status: str):
-    job = session.get(ProcessingJob, case.id, with_for_update=True)
+def lease_until(seconds: int) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+
+
+def claim_job(session: Session, case_id: str, worker_id: str, lease_seconds: int) -> bool:
+    """Compare-and-set claim: exactly one worker turns a ``queued`` job into ``running``
+    under its own lease. Returns False when another worker got there first."""
+    stamp = now()
+    claimed = session.execute(
+        update(ProcessingJob)
+        .where(ProcessingJob.case_id == case_id, ProcessingJob.status == "queued")
+        .values(
+            status="running",
+            worker_id=worker_id,
+            lease_expires_at=lease_until(lease_seconds),
+            attempts=ProcessingJob.attempts + 1,
+            started_at=stamp,
+            updated_at=stamp,
+        )
+    ).rowcount
+    return claimed == 1
+
+
+def renew_lease(session: Session, case_id: str, worker_id: str, lease_seconds: int) -> bool:
+    """Extend the lease while the attempt is alive. False means the job is no longer
+    this worker's (re-queued as stalled and possibly claimed by someone else)."""
+    renewed = session.execute(
+        update(ProcessingJob)
+        .where(
+            ProcessingJob.case_id == case_id,
+            ProcessingJob.status == "running",
+            ProcessingJob.worker_id == worker_id,
+        )
+        .values(lease_expires_at=lease_until(lease_seconds), updated_at=now())
+    ).rowcount
+    return renewed == 1
+
+
+def owned_job(session: Session, case_id: str, worker_id: str) -> ProcessingJob:
+    """The job this worker holds, locked for the rest of the transaction; ``LeaseLost``
+    when it was taken over. Every processing step checks this first so a worker that
+    paused past its lease cannot keep acting on a case another worker now owns."""
+    job = session.get(ProcessingJob, case_id, with_for_update=True)
+    if job is None or job.status != "running" or job.worker_id != worker_id:
+        raise LeaseLost()
+    return job
+
+
+def finish_job(session: Session, case: Case, worker_id: str, status: str):
+    job = owned_job(session, case.id, worker_id)
     job.status = status
+    job.lease_expires_at = None
     job.updated_at = now()
     audit(
         session, case, "system:job", "processing_finished", {"action": job.action, "status": status}
     )
 
 
-def fail_job(session: Session, case: Case, detail: str, retryable: bool):
-    job = session.get(ProcessingJob, case.id, with_for_update=True)
+def fail_job(session: Session, case: Case, worker_id: str, detail: str, retryable: bool):
+    job = owned_job(session, case.id, worker_id)
     job.status = "failed"
     job.retryable = retryable
     job.last_error = detail[:300]
+    job.lease_expires_at = None
     job.updated_at = now()
     audit(
         session,
@@ -435,6 +520,53 @@ def fail_job(session: Session, case: Case, detail: str, retryable: bool):
             "retryable": retryable,
         },
     )
+
+
+def stalled_jobs(session: Session) -> list[ProcessingJob]:
+    at = now()
+    running = session.scalars(select(ProcessingJob).where(ProcessingJob.status == "running")).all()
+    return [job for job in running if lease_expired(job, at)]
+
+
+def requeue_stalled(session: Session, job: ProcessingJob, max_attempts: int) -> str | None:
+    """Give a stalled job back to the queue, or fail it once it has stalled too often
+    (a poison case must not spin forever). Returns the new status, or None when the
+    job changed under us (its worker came back or another sweeper handled it)."""
+    # Case row first, then job row: the same order as every worker step and the
+    # API's enqueue, so a sweeper and a still-alive owner cannot deadlock.
+    case = session.get(Case, job.case_id, with_for_update=True)
+    stamp = now()
+    took = session.execute(
+        update(ProcessingJob)
+        .where(
+            ProcessingJob.case_id == job.case_id,
+            ProcessingJob.status == "running",
+            ProcessingJob.worker_id == job.worker_id,
+            ProcessingJob.lease_expires_at == job.lease_expires_at,
+        )
+        .values(
+            status="queued" if job.attempts < max_attempts else "failed",
+            worker_id=None,
+            lease_expires_at=None,
+            queued_at=stamp,
+            updated_at=stamp,
+            retryable=job.attempts >= max_attempts,
+            last_error=None
+            if job.attempts < max_attempts
+            else f"Processing stalled {job.attempts} times; retry manually",
+        )
+    ).rowcount
+    if took != 1:
+        return None
+    session.refresh(job)
+    audit(
+        session,
+        case,
+        "system:job",
+        "processing_stalled",
+        {"action": job.action, "attempt": job.attempts, "status": job.status},
+    )
+    return job.status
 
 
 def job_view(session: Session, case: Case) -> dict[str, Any] | None:
@@ -451,6 +583,9 @@ def job_view(session: Session, case: Case) -> dict[str, Any] | None:
             "last_error",
             "started_at",
             "updated_at",
+            "queued_at",
+            "worker_id",
+            "lease_expires_at",
         )
     }
 

@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from helpers import action, policy, submit
+from helpers import action, drain, policy, run, submit
 from policy_update.api import create_app
 from policy_update.models import Assignment, AuditEvent, Case, Execution, Policy
 
@@ -58,25 +58,42 @@ def test_intake_is_persisted_before_processing(client, guest, contact):
         == 409
     )
     assert client.get(f"/cases/{received['id']}", headers=guest).json()["status"] == "received"
-    processed = client.post(f"/cases/{received['id']}/process", headers=guest)
-    assert processed.status_code == 200
-    assert processed.json()["status"] == "awaiting_approval"
-    assert processed.json()["proposals"][0]["changes"] == contact["changes"]
-    assert [event["action"] for event in processed.json()["timeline"]] == [
+    # /process only queues: the request answers 202 with the case still received and
+    # its job queued; a second request while queued is refused.
+    queued = client.post(f"/cases/{received['id']}/process", headers=guest)
+    assert queued.status_code == 202
+    assert queued.json()["status"] == "received"
+    assert queued.json()["job"]["status"] == "queued" and queued.json()["job"]["attempts"] == 0
+    assert queued.json()["job"]["worker_id"] is None
+    again = client.post(f"/cases/{received['id']}/process", headers=guest)
+    assert again.status_code == 409 and "already queued" in again.json()["detail"]
+    assert client.get("/cases", headers=guest).json()[0]["job_status"] == "queued"
+    assert drain(client) == [received["id"]]
+    processed = client.get(f"/cases/{received['id']}", headers=guest).json()
+    assert processed["status"] == "awaiting_approval"
+    assert processed["proposals"][0]["changes"] == contact["changes"]
+    assert [event["action"] for event in processed["timeline"]] == [
         "case_created",
+        "processing_queued",
         "proposal_validated",
         "processing_finished",
     ]
-    assert processed.json()["job"] == {
-        **{key: processed.json()["job"][key] for key in ("started_at", "updated_at")},
+    assert processed["job"] == {
+        **{
+            key: processed["job"][key]
+            for key in ("started_at", "updated_at", "queued_at", "worker_id")
+        },
         "action": "process",
         "status": "waiting",
         "attempts": 1,
         "retryable": False,
         "last_error": None,
+        "lease_expires_at": None,
     }
+    assert processed["job"]["worker_id"] == client.app.state.worker.id
     assert client.get("/cases", headers=guest).json()[0]["job_status"] == "waiting"
     assert client.post(f"/cases/{received['id']}/process", headers=guest).status_code == 409
+    assert drain(client) == []
     assert client.get(f"/cases/{received['id']}", headers=guest).json()["current_version"] == 1
 
 
@@ -91,7 +108,9 @@ def test_processing_failure_keeps_intake_retryable(app, guest, contact, monkeypa
                 "validate_changes",
                 lambda *_: (_ for _ in ()).throw(RuntimeError("Simulated processing crash")),
             )
-            assert client.post(f"/cases/{received['id']}/process", headers=guest).status_code == 500
+            # The crash happens in the worker, not in the request: queueing succeeds.
+            assert client.post(f"/cases/{received['id']}/process", headers=guest).status_code == 202
+            assert drain(client) == [received["id"]]
         detail = client.get(f"/cases/{received['id']}", headers=guest).json()
         assert detail["status"] == "received"
         assert detail["proposals"] == []
@@ -102,12 +121,11 @@ def test_processing_failure_keeps_intake_retryable(app, guest, contact, monkeypa
         assert detail["job"]["last_error"] == "Unexpected processing error"
         [failed] = [e for e in detail["timeline"] if e["action"] == "processing_failed"]
         assert failed["details"]["attempt"] == 1
-        retried = client.post(f"/cases/{received['id']}/process", headers=guest)
-        assert retried.status_code == 200
-        assert retried.json()["status"] == "awaiting_approval"
-        assert retried.json()["current_version"] == 1
-        assert retried.json()["job"]["attempts"] == 2
-        assert retried.json()["job"]["status"] == "waiting"
+        retried = run(client, guest, received["id"])
+        assert retried["status"] == "awaiting_approval"
+        assert retried["current_version"] == 1
+        assert retried["job"]["attempts"] == 2
+        assert retried["job"]["status"] == "waiting"
 
 
 def test_intake_without_changes_pauses_until_reviewer_supplies_them(client, guest, contact):
@@ -375,8 +393,8 @@ def test_paused_case_approval_and_receipt_survive_restart(tmp_path, contact):
         assert case["status"] == "received"
     with TestClient(create_app(url, model=None)) as second:
         assert second.get(f"/cases/{case['id']}", headers=guest).json()["status"] == "received"
-        processed = second.post(f"/cases/{case['id']}/process", headers=guest)
-        assert processed.json()["status"] == "awaiting_approval"
+        processed = run(second, guest, case["id"])
+        assert processed["status"] == "awaiting_approval"
         assert action(second, guest, case, "approve").status_code == 200
     with TestClient(create_app(url, model=None)) as third:
         result = action(third, guest, case, "execute")

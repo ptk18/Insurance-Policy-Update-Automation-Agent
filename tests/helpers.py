@@ -1,14 +1,33 @@
 """Shared API helpers for the backend test modules."""
 
 
+def drain(client):
+    """Run the app's worker to completion in this thread (WORKER_MODE=external in
+    tests, so nothing runs in the background). Returns the case IDs it processed."""
+    return client.app.state.worker.run_pending()
+
+
+def run(client, guest, case_id, route="process", expected=202):
+    """Queue ``route`` (process/resume/retry) for a case, let the worker run it, and
+    return the stored case. With ``expected`` != 202 the refusal is returned instead."""
+    response = client.post(f"/cases/{case_id}/{route}", headers=guest)
+    assert response.status_code == expected, response.text
+    if expected != 202:
+        return response.json()
+    assert response.json()["job"]["status"] == "queued"
+    drain(client)
+    detail = client.get(f"/cases/{case_id}", headers=guest)
+    assert detail.status_code == 200, detail.text
+    return detail.json()
+
+
 def submit(client, guest, payload):
-    # Intake persists first; processing is a separate request and transaction.
+    # Intake persists first; processing is queued by a separate request and run by
+    # the worker in its own transactions.
     response = client.post("/cases", headers=guest, json=payload)
     assert response.status_code == 201, response.text
     assert response.json()["status"] == "received"
-    processed = client.post(f"/cases/{response.json()['id']}/process", headers=guest)
-    assert processed.status_code == 200, processed.text
-    return processed.json()
+    return run(client, guest, response.json()["id"])
 
 
 def action(client, guest, case, name, version=1):
@@ -87,6 +106,10 @@ class FakeChat:
         item = self.decisions.pop(0)
         if isinstance(item, Exception):
             raise item
+        if callable(item):
+            # A hook: lets a test change the world (for example take over the job's
+            # lease) between two decisions, then returns the decision to use.
+            return item()
         return item
 
 

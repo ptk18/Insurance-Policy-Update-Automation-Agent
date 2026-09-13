@@ -12,17 +12,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from policy_update import service
-from policy_update.agent import AgentRunner, make_checkpointer
-from policy_update.database import initialize_database, make_database
-from policy_update.extraction import ChatModel, ModelClient, model_from_env
+from policy_update.database import initialize_database
+from policy_update.extraction import ChatModel, ModelClient
 from policy_update.fixtures import BROKERS, DOCUMENTS, EVIDENCE, SAMPLES, document_bytes
 from policy_update.models import Case, ProcessingJob, Workspace
+from policy_update.runtime import FROM_ENV, build_runtime
 from policy_update.schemas import BrokerId, Intake, ProposalEdit, Rejection, Reply, VersionAction
-from policy_update.settings import load_env_file
 
 bearer = HTTPBearer(auto_error=False)
-# Sentinel: "configure the model from the environment" as opposed to an explicit None.
-FROM_ENV = object()
 
 
 def session_dependency(request: Request):
@@ -90,29 +87,16 @@ def create_app(
     max_attachment_bytes: int | None = None,
     model: ModelClient | None | object = FROM_ENV,
     agent_model: ChatModel | None | object = FROM_ENV,
+    worker_mode: str | None = None,
 ) -> FastAPI:
     """``model`` (extraction) and ``agent_model`` (tool selection) default to the
     provider configured through ``.env``/environment (``GEMINI_API_KEY``; set
     ``AGENT_LOOP=off`` to keep rule-based processing). Tests pass explicit fakes or
-    ``None`` so no live call happens."""
-    if model is FROM_ENV:
-        load_env_file()
-        model = model_from_env()
-    if agent_model is FROM_ENV:
-        enabled = os.environ.get("AGENT_LOOP", "on").lower() not in {"off", "0", "false"}
-        agent_model = model if enabled and hasattr(model, "choose") else None
-    database_url = database_url or os.environ.get("DATABASE_URL", "sqlite:///./policy_demo.db")
-    engine, sessions = make_database(database_url)
-    agent = (
-        AgentRunner(
-            agent_model,
-            make_checkpointer(database_url),
-            sessions,
-            budget=int(os.environ.get("AGENT_TOOL_BUDGET", "12")),
-        )
-        if agent_model is not None
-        else None
-    )
+    ``None`` so no live call happens, and ``worker_mode="external"`` so they drive
+    ``app.state.worker`` themselves instead of a background thread."""
+    runtime = build_runtime(database_url, model, agent_model, worker_mode)
+    engine, sessions, model, agent = runtime.engine, runtime.sessions, runtime.model, runtime.agent
+    worker = runtime.worker
     attachment_limit = max_attachment_bytes or int(
         os.environ.get("MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024))
     )
@@ -120,21 +104,26 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         initialize_database(engine)
+        if runtime.worker_mode == "embedded":
+            worker.start()
         yield
+        worker.stop()
         engine.dispose()
 
     app = FastAPI(
         title="Insurance Policy Update — backend foundation",
         version="0.1.0",
         description="Synthetic-data review API. Structured or free-text intake, uploaded "
-        "PDF evidence, and text-only hosted-model extraction; image inspection, the "
-        "agent worker, and the dashboard are not implemented yet.",
+        "PDF evidence, text-only hosted-model extraction, and a bounded agent loop run "
+        "by a job worker. The review dashboard runs separately on port 3000; "
+        "image inspection is not implemented yet.",
         lifespan=lifespan,
     )
     app.state.sessions = sessions
     app.state.engine = engine
     app.state.model = model
     app.state.agent = agent
+    app.state.worker = worker
 
     @app.exception_handler(service.DomainError)
     async def domain_error(_request, error):
@@ -167,6 +156,7 @@ def create_app(
             "status": "ok",
             "extraction": model.name if model else "unconfigured",
             "agent": agent.model.name if agent else "unconfigured",
+            "worker": runtime.worker_mode,
         }
 
     @app.post("/workspaces", status_code=201)
@@ -211,71 +201,36 @@ def create_app(
         case = service.create_case(session, guest.id, data)
         return service.case_view(session, case)
 
-    def record_failure(case_id: str, owner: str, detail: str, retryable: bool):
-        with sessions.begin() as session:
-            service.fail_job(session, service.get_case(session, owner, case_id), detail, retryable)
-
-    def attempt(case_id: str, owner: str, allowed: set[str], retry: bool = False):
-        """One processing attempt wrapped in a durable job record. Each phase commits
-        on its own so a failure inside the run is recorded even though the case
-        itself keeps its last committed state and stays retryable."""
+    def enqueue(case_id: str, owner: str, allowed: set[str], retry: bool = False):
+        """Queue one processing attempt for a worker and answer 202 with the case as
+        stored. The worker runs it outside this request; poll ``GET /cases/{id}``
+        (``job.status``) for the outcome."""
         with sessions.begin() as session:
             case = service.get_case(session, owner, case_id)
             action = service.next_action(case, agent is not None)
             if action not in allowed:
                 raise service.DomainError(409, f"Use /retry to {action} this case")
-            service.start_job(session, case, action, retry)
-        try:
-            if agent is None:
-                with sessions.begin() as session:
-                    case = service.get_case(session, owner, case_id)
-                    service.process_case(session, case, model)
-            elif action == "process":
-                with sessions.begin() as session:
-                    case = service.get_case(session, owner, case_id)
-                    service.begin_agent_processing(session, case, model)
-                agent.run(case_id, owner)
-            elif action == "continue":
-                agent.run(case_id, owner)
-            else:
-                with sessions.begin() as session:
-                    event = service.resume_event(service.get_case(session, owner, case_id))
-                agent.run(case_id, owner, resume=event)
-        except service.DomainError as error:
-            # 409s are precondition refusals (concurrent run, state changed), not a
-            # failed attempt; anything else is recorded on the job for manual retry.
-            if error.status != 409:
-                record_failure(case_id, owner, error.detail, error.status == 503)
-            raise
-        except Exception:
-            # An unexpected crash inside the attempt: the case keeps its last committed
-            # state; mark the job failed so it is visible and can be retried.
-            record_failure(case_id, owner, "Unexpected processing error", True)
-            raise
-        with sessions.begin() as session:
-            case = service.get_case(session, owner, case_id)
-            waiting = case.status in {"awaiting_information", "awaiting_approval", "approved"}
-            service.finish_job(session, case, "waiting" if waiting else "completed")
-            return service.case_view(session, case)
+            service.enqueue_job(session, case, action, retry)
+            return JSONResponse(status_code=202, content=service.case_view(session, case))
 
-    @app.post("/cases/{case_id}/process")
+    @app.post("/cases/{case_id}/process", status_code=202)
     def process(case_id: str, owner: Owner):
         # Rule-based when no model is configured; otherwise the agent loop. A case
         # left `processing` by a failure continues from its checkpoint.
-        return attempt(case_id, owner, {"process", "continue"})
+        return enqueue(case_id, owner, {"process", "continue"})
 
-    @app.post("/cases/{case_id}/resume")
+    @app.post("/cases/{case_id}/resume", status_code=202)
     def resume(case_id: str, owner: Owner):
         # Continue the agent after a human reply or approval. Approval itself stays a
         # reviewer API action; the loop only observes its result.
         if agent is None:
             raise HTTPException(409, "No agent loop is configured; use /execute instead")
-        return attempt(case_id, owner, {"resume"})
+        return enqueue(case_id, owner, {"resume"})
 
-    @app.post("/cases/{case_id}/retry")
+    @app.post("/cases/{case_id}/retry", status_code=202)
     def retry(case_id: str, owner: Owner):
-        # Manual recovery for a failed or stalled job: runs whichever attempt applies.
-        return attempt(case_id, owner, {"process", "continue", "resume"}, retry=True)
+        # Manual recovery for a failed or stalled job: queues whichever attempt applies.
+        return enqueue(case_id, owner, {"process", "continue", "resume"}, retry=True)
 
     @app.post("/cases/{case_id}/attachments", status_code=201)
     def upload(case_id: str, file: Annotated[UploadFile, File()], session: Db, guest: Guest):
@@ -317,7 +272,8 @@ def create_app(
 
     @app.get("/cases/{case_id}")
     def case_detail(case_id: str, session: Db, guest: Guest):
-        return service.case_view(session, service.get_case(session, guest.id, case_id))
+        # Unlocked read: clients poll this while a worker step may hold the row.
+        return service.case_view(session, service.get_case(session, guest.id, case_id, lock=False))
 
     @app.put("/cases/{case_id}/proposal")
     def edit(case_id: str, data: ProposalEdit, session: Db, guest: Guest):

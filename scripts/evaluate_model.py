@@ -10,7 +10,6 @@ guest token stays in memory and is never printed.
 import json
 import sys
 import time
-from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 BASE_URL = "http://127.0.0.1:8000"
@@ -104,14 +103,27 @@ def main():
         with urlopen(Request(BASE_URL + path, data=body, headers=headers, method=method)) as r:
             return json.load(r)
 
+    def wait_for_job(path, timeout=240):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            case = request("GET", path)
+            if case["job"]["status"] not in {"queued", "running"}:
+                return case
+            time.sleep(0.5)
+        raise RuntimeError("The worker did not finish the job in time")
+
     def process(path):
+        # /process queues a job for the worker; a retryable model outage is recorded
+        # on the job and /retry continues from the checkpoint.
+        request("POST", path + "/process")
         for attempt in range(5):
-            try:
-                return request("POST", path + "/process")
-            except HTTPError as error:
-                if error.code not in (502, 503) or attempt == 4:
-                    raise
-                time.sleep(10)
+            case = wait_for_job(path)
+            if case["job"]["status"] != "failed":
+                return case
+            if not case["job"]["retryable"] or attempt == 4:
+                raise RuntimeError(f"Processing failed: {case['job']['last_error']}")
+            time.sleep(10)
+            request("POST", path + "/retry")
 
     health = request("GET", "/health")
     if health["extraction"] == "unconfigured":

@@ -69,8 +69,8 @@ Evidence: [API](../src/policy_update/api.py),
   persists the case (`received`, optional `requested_changes`); `POST
   /cases/{id}/process` runs `service.process_case` in its own transaction and is
   refused once a case has left `received`. Version-bound actions on an unprocessed
-  case fail with 409. Processing is still a synchronous rule-based stand-in for the
-  planned worker: no job record, queue, or LangGraph checkpoint exists (A05/A06).
+  case fail with 409. Since A05 the route only queues a durable job (`202`) that
+  the worker runs.
 
 ## 2. Attachments and evidence
 
@@ -108,9 +108,10 @@ attachments inspected by [documents.py](../src/policy_update/documents.py).
 
 The bounded loop in [agent.py](../src/policy_update/agent.py) runs when a model
 is configured (`GEMINI_API_KEY`; `AGENT_LOOP=off` keeps rule-based processing).
-`POST /cases/{id}/process` moves the case to `processing`, extracts free text if
-needed, and runs the LangGraph loop inside the API process; `POST /cases/{id}/resume`
-continues it after a human reply or approval. There is no separate worker process.
+`POST /cases/{id}/process`, `/resume`, and `/retry` queue a durable job and answer
+`202`; the worker in [worker.py](../src/policy_update/worker.py) claims it, moves
+the case to `processing`, extracts free text if needed, and runs the LangGraph loop
+(or rule-based processing when no model is configured) outside any request.
 
 - [x] A01 — Provider: Gemini (`gemini-3.8-flash` by default, `GEMINI_MODEL`
   override) through `generateContent` REST with a JSON response schema;
@@ -150,30 +151,45 @@ continues it after a human reply or approval. There is no separate worker proces
   `awaiting_information` case (after a reply) or an `approved` case, refusing an
   unapproved one. Approve/reject/edit remain reviewer API actions; the loop never
   sees a bearer token and observes approval only through case state.
-- [ ] A05 — **Partial:** checkpoints persist in LangGraph's tables in the same
-  SQLite file or PostgreSQL database (`make_checkpointer`), keyed by case ID, so an
-  interrupted or failed loop survives an app restart and continues from its last
-  completed step (proved by tests and a live 503 retry); the `processing_jobs`
-  table records every attempt. The loop still runs inside the API request (with an
-  in-process per-case lock and the job's `running` marker); there is no queue or
-  separate worker, so a run whose process dies mid-step is recovered only by an
-  explicit `POST /cases/{id}/retry`.
-- [x] A06 — Every `/process`, `/resume`, and `/retry` attempt is wrapped in a
-  durable `ProcessingJob` row (action, `running|waiting|completed|failed`, attempts,
-  `retryable`, sanitized `last_error`), committed before and after the run so a
-  model failure (503 retryable / 502 not), a crash inside the request, or a dead
-  process leaves a visible record and a `processing_failed` audit event while the
-  case keeps its last committed state (`received`, or `processing` with its
-  checkpoint). `POST /cases/{id}/retry` runs whichever attempt applies and is the
-  only way past a stalled `running` job; `/process` and `/resume` refuse
-  mismatched states with a hint. Execution retry remains the idempotent `/execute`.
-  The case view carries `job`, the list `job_status`. The Gemini client retries
-  once honouring `Retry-After` and reports Google's status word.
-- [x] A07 — The timeline records `processing_started`, `request_extracted`,
-  per-turn `agent_decision` (chosen tool and the model's one-sentence stated
-  intent, capped at 300 characters), per-call `tool_called` (tool, argument names,
-  outcome), and `agent_finished`. Hidden reasoning, raw request text, and document
-  contents are never recorded.
+- [x] A05 — Checkpoints persist in LangGraph's tables in the same SQLite file or
+  PostgreSQL database (`make_checkpointer`), keyed by case ID, so an interrupted or
+  failed loop survives a restart and continues from its last completed step. The
+  loop runs outside API requests: the routes only queue a job (`202`), and the
+  worker claims it with a compare-and-set update (`queued → running` under its
+  worker ID and a lease, `JOB_LEASE_SECONDS`), renews the lease from a heartbeat
+  thread, and re-checks ownership inside every processing step's transaction so a
+  worker paused past its lease stops instead of acting on a case another worker
+  took over (`LeaseLost`). Any worker's poll sweeps lapsed leases back into the
+  queue (`processing_stalled`) and fails a job that stalled `MAX_JOB_ATTEMPTS`
+  times for a manual `/retry`. `WORKER_MODE=embedded` (default) runs the worker
+  as a thread in the API process; `external` leaves the work to
+  `python -m policy_update.worker` processes over the same database. Proved by
+  [test_worker.py](../tests/test_worker.py) on SQLite and PostgreSQL (exclusive
+  claim, sweep and rerun, poison cap, lease fencing with checkpoint continuation,
+  embedded thread, a real separate worker process) and by the demo in both modes
+  (2026-09-12, rule-based, no model key). A killed worker host was not exercised
+  live; the stalled-job path is simulated by a lapsed lease.
+- [x] A06 — Every `/process`, `/resume`, and `/retry` attempt is a durable
+  `ProcessingJob` row (action, `queued|running|waiting|completed|failed`, attempts,
+  `retryable`, sanitized `last_error`, `worker_id`, `lease_expires_at`), committed
+  at queue time, claim time, and after the run, so a model failure (outage
+  retryable, other errors not), a crash inside the worker, or a dead worker leaves
+  a visible record and a `processing_failed`/`processing_stalled` audit event while
+  the case keeps its last committed state (`received`, or `processing` with its
+  checkpoint). `POST /cases/{id}/retry` queues whichever attempt applies and is the
+  only manual way past a stalled `running` job before the sweep reclaims it;
+  `/process` and `/resume` refuse a queued or live-leased job and mismatched
+  states with a hint. Execution retry remains the idempotent `/execute`. The case
+  view carries `job`, the list `job_status`. The Gemini client retries once
+  honouring `Retry-After`. Agent and extraction failures retain the HTTP code and
+  allowlisted Google status/transport category in `job.last_error` and the failure
+  audit, without exposing arbitrary provider text (reporting fix, 2026-09-12).
+- [x] A07 — The timeline records `processing_queued`, `processing_started`,
+  `request_extracted`, per-turn `agent_decision` (chosen tool and the model's
+  one-sentence stated intent, capped at 300 characters), per-call `tool_called`
+  (tool, argument names, outcome), `agent_finished`, and the job outcomes
+  (`processing_finished`, `processing_failed`, `processing_stalled`). Hidden
+  reasoning, raw request text, and document contents are never recorded.
 - [x] A08 — Deterministic fakes cover tool boundaries and budget
   ([test_tools.py](../tests/test_tools.py)), model errors, interruption/resumption,
   crash continuation, and restart ([test_agent.py](../tests/test_agent.py)), and a
@@ -191,22 +207,28 @@ continues it after a human reply or approval. There is no separate worker proces
 ## 4. Review dashboard
 
 Depends on the [design baseline](design-system.md). The existing API supports early
-UI integration, but no Next.js app, components, styles, or screenshots exist yet.
+UI integration. The Next.js dashboard, shared styles, and screenshot baseline now
+live in `frontend/` and `_docs/screenshots/`. The browser suite uses an isolated
+SQLite API, rule-based processing, and one scripted extraction retry; live-agent
+browser verification and broader accessibility checks remain pending.
 
-- [ ] U01 — Establish visual tokens, component/state conventions, and responsive
+- [x] U01 — Establish visual tokens, component/state conventions, and responsive
   layouts; record the first implemented baseline and screenshot references.
-- [ ] U02 — Scaffold Next.js/React, guest session entry, sample selection, pasted
+- [x] U02 — Scaffold Next.js/React, guest session entry, sample selection, pasted
   email intake, and attachment upload against the backend.
-- [ ] U03 — Build case list/detail with status, original request/replies, supporting
+- [x] U03 — Build case list/detail with status, original request/replies, supporting
   documents and sources, validation findings, and current/proposed values.
-- [ ] U04 — Implement editing, explicit version-bound approve/reject controls,
+- [x] U04 — Implement editing, explicit version-bound approve/reject controls,
   stale-version refresh, and approval invalidation feedback.
-- [ ] U05 — Implement missing-information/corrected-evidence flow on the same case,
+- [x] U05 — Implement missing-information/corrected-evidence flow on the same case,
   visible draft follow-ups, and backend-supported processing resume.
-- [ ] U06 — Show approved-but-unapplied state, execution progress/failure, manual
+- [x] U06 — Show approved-but-unapplied state, execution progress/failure, manual
   retry, persisted outcome, confirmation draft, and audit timeline.
-- [ ] U07 — Verify keyboard use, focus, readable status/error feedback, loading and
-  empty states, narrow layouts, and visual consistency across all core scenarios.
+- [ ] U07 — **Partial:** Chromium checks cover keyboard tabs, dialog focus/escape,
+  status/error feedback, guest isolation, core review/correction/retry flows, and
+  a 390 px layout; reference screenshots are saved for the core persistent states.
+  Screen-reader/contrast audit, other browsers, transient-state baselines, and
+  automated visual comparisons remain. See the design and testing records.
 
 ## 5. Verification and deployment
 
@@ -214,8 +236,9 @@ Evidence: [tests](../tests/test_workflow.py),
 [CI configuration](../.github/workflows/ci.yml), and
 [demo script](../scripts/demo.py).
 
-- [x] V01 — Add backend regression tests: 64 test functions / 83 parameterized
-  cases across six modules. See the testing guide for assertions and gaps.
+- [x] V01 — Add backend regression tests: 74 test functions / 97 parameterized
+  cases across seven modules. See the testing guide for assertions, run history,
+  and gaps; the latest model-error reporting checks use fakes, not a live API.
 - [x] V02 — Verify the backend suite locally on SQLite and PostgreSQL; verify lint
   and formatting. A06/A08 session (2026-09-12): 83 passed on SQLite and on a dedicated
   local PostgreSQL test database; `ruff check`/`ruff format --check` clean.
@@ -244,34 +267,36 @@ Evidence: [tests](../tests/test_workflow.py),
 Numbers refer to the twelve criteria in [plan.md](plan.md). These are readiness
 notes, not an assertion that the full deployed product passes acceptance.
 
-1. **Partial:** isolated guests and samples via API (B02/E01); guest UI absent (U02).
+1. **Partial:** isolated guests and samples via API (B02/E01); guest entry/sample intake and browser isolation verified locally (U02). Hosted proof remains.
 2. **Partial:** fixture- and PDF-backed proposals, grounded free-text extraction,
    and model-selected tool sequences work (B06/B08/E04/A01–A04); image inspection
    through the model is absent.
 3. **Agent covered:** contact-only proceeds without attachment through the loop
-   (B04/B09/A03/V01/V04); the UI demonstration remains (U02–U04).
+   (B04/B09/A03/V01/V04); local browser review/approval/application verified with the rule-based worker (U02–U04); live agent UI proof remains.
 4. **Agent covered:** missing number/evidence, scanned, and unlabeled PDFs pause
    and draft clarification, and the loop's `draft_follow_up` pauses via interrupt
    (B05/B06/E04/A04).
 5. **Backend covered:** conflicting fixtures and PDFs block; a corrected reply or
    corrected upload bound by a reply creates a valid new version (B07/B08/E05);
-   the dashboard flow remains (U05).
+   the dashboard correction flow is verified with matching uploaded PDFs (U05).
 6. **API and agent covered:** unassigned/revoked access and cross-workspace
    attachment access are denied (B05/E03/V01); the typed tools reuse those checks,
    cannot reach approval, and the loop refuses other guests (A02–A04); adversarial
    model evaluation remains (A08).
 7. **Partial:** before/after data and exact-version approval exist (B08/B09);
-   reviewer dashboard absent (U03/U04).
+   the reviewer dashboard exposes the values and version-bound actions (U03/U04). Hosted acceptance remains.
 8. **Partial:** execution, saved values/audit, and confirmation template exist
-   (B10/B11); model execution and dashboard presentation absent (A02/U06).
+   (B10/B11); the dashboard shows the persisted applied values, activity, and unsent confirmation (U06). Live-agent browser verification remains.
 9. **API and agent covered:** unapproved/stale execution is rejected and the loop's
-   `apply_approved_update` fails before approval (B09/B10/A04/V01); UI remains (U04).
-10. **Partial:** app recreation retains cases, receipts, job records, and the
-    interrupted LangGraph thread, which resumes after restart; a failed step
-    continues from its checkpoint via `/retry`. A separate worker and host restart
-    recovery remain (A05/V08).
+   `apply_approved_update` fails before approval (B09/B10/A04/V01); the browser checks approval invalidation and stale edits (U04).
+10. **Backend covered:** app recreation retains cases, receipts, job records, and
+    the interrupted LangGraph thread, which resumes after restart; a failed step
+    continues from its checkpoint; a job whose worker stopped renewing its lease is
+    swept back to the queue and finished by a live worker, or fails visibly after
+    `MAX_JOB_ATTEMPTS` (A05/A06). Host restart in the deployed environment remains
+    (V08).
 11. **Cases/policies/attachments covered:** API tenant isolation exists
-    (B02/E03/V01); browser session separation remains (U02).
+    (B02/E03/V01); browser session separation is verified with independent cookie contexts (U02).
 12. **Covered for the backend:** raw request text, forged approval input,
     instruction text inside an uploaded PDF, and a model steered by any of them
     cannot bypass evidence, approval, authorization, or isolation (E06/A01/A08);
@@ -287,6 +312,6 @@ notes, not an assertion that the full deployed product passes acceptance.
   matching, access configuration, and outbound-message policy with separate tests.
   Real sending is outside the initial demo.
 
-Next work: the worker half of A05 (queue/worker owning the loop, stale-job
-detection), the deferred image inspection through the adapter (E04), and then the
-review dashboard (U01–U07) against the existing endpoints.
+Next work: complete broader dashboard verification (U07) and a live-agent browser
+walkthrough, then migrations and deployment readiness (V05–V08). Image inspection
+(E04) remains explicitly deferred; the dashboard currently supports text PDFs.

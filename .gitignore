@@ -9,4 +9,8 @@ __pycache__/
 .env.*
 !.env.example
 .DS_Store
-
+node_modules/
+.next/
+*.tsbuildinfo
+playwright-report/
+test-results/

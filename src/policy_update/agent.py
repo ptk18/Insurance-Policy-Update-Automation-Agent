@@ -11,6 +11,7 @@ checkpoint. Mandatory controls live in the tools and the service layer, never he
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from typing import Any, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -87,8 +88,10 @@ def tool_declarations() -> list[dict[str, Any]]:
 
 
 class AgentRunner:
-    """Owns the compiled graph and runs one case thread per call, inside the API
-    process for now. A separate worker (A05) would call ``run`` the same way."""
+    """Owns the compiled graph and runs one case thread per call on behalf of the
+    worker that claimed the case's job. The worker passes a ``guard`` that every step
+    calls inside its own transaction, so a run whose job lease was taken over stops
+    before acting again."""
 
     def __init__(
         self,
@@ -103,6 +106,7 @@ class AgentRunner:
         self.budget = budget
         self.locks: dict[str, threading.Lock] = {}
         self.locks_guard = threading.Lock()
+        self._local = threading.local()
         self.graph = self._build()
 
     # ----- graph -------------------------------------------------------------
@@ -122,9 +126,17 @@ class AgentRunner:
         builder.add_edge("finish", END)
         return builder.compile(checkpointer=self.checkpointer)
 
+    def _guard(self, session: Session):
+        # Called after get_case so every transaction locks the case row before the
+        # job row, the same order the API's enqueue uses (no lock-order cycle).
+        guard = getattr(self._local, "guard", None)
+        if guard is not None:
+            guard(session)
+
     def _decide(self, state: AgentState) -> dict[str, Any]:
         with self.sessions.begin() as session:
             case = service.get_case(session, state["workspace_id"], state["case_id"])
+            self._guard(session)
             snapshot = self._snapshot(session, case)
         prompt = [
             *state["messages"],
@@ -133,6 +145,7 @@ class AgentRunner:
         decision = self.model.choose(SYSTEM_INSTRUCTION, prompt, tool_declarations())
         with self.sessions.begin() as session:
             case = service.get_case(session, state["workspace_id"], state["case_id"])
+            self._guard(session)
             # Concise decision summary only: the model's stated intent, not hidden
             # reasoning, and never the raw request text.
             service.audit(
@@ -165,6 +178,7 @@ class AgentRunner:
         call = state["decision"]
         with self.sessions.begin() as session:
             case = service.get_case(session, state["workspace_id"], state["case_id"])
+            self._guard(session)
             context = ToolContext(
                 session, case, actor=self.model.name, budget=self.budget - state["steps"]
             )
@@ -215,6 +229,7 @@ class AgentRunner:
         outcome = state["outcome"] or ("budget_exhausted" if state["steps"] >= self.budget else "")
         with self.sessions.begin() as session:
             case = service.get_case(session, state["workspace_id"], state["case_id"])
+            self._guard(session)
             if case.status in {"received", "processing"}:
                 # The model stopped without leaving a proposal behind: pause for a human
                 # instead of stranding the case, and say why in the draft.
@@ -300,13 +315,33 @@ class AgentRunner:
     def state(self, case_id: str):
         return self.graph.get_state(self.config(case_id))
 
-    def run(self, case_id: str, workspace_id: str, resume: str | None = None) -> dict[str, Any]:
+    def pending(self, case_id: str) -> str | None:
+        """What this case's thread needs next: ``"resume"`` when it is parked on an
+        interrupt, ``"continue"`` when a step failed after the interrupt was consumed,
+        or None when there is no unfinished thread."""
+        snapshot = self.state(case_id)
+        if snapshot.interrupts:
+            return "resume"
+        if snapshot.next:
+            return "continue"
+        return None
+
+    def run(
+        self,
+        case_id: str,
+        workspace_id: str,
+        resume: str | None = None,
+        guard: Callable[[Session], None] | None = None,
+    ) -> dict[str, Any]:
         """Start, continue after a crash, or resume after a human event. The caller must
         have moved the case into ``processing`` (start) or verified the interrupt
-        (resume) in a committed transaction beforehand."""
+        (resume) in a committed transaction beforehand. ``guard`` is called inside
+        every step's transaction and raises when the caller no longer owns the case's
+        job."""
         lock = self._lock(case_id)
         if not lock.acquire(blocking=False):
             raise service.DomainError(409, "This case is already being processed")
+        self._local.guard = guard
         try:
             snapshot = self.state(case_id)
             if resume is not None:
@@ -337,7 +372,12 @@ class AgentRunner:
             except ModelError as error:
                 raise service.DomainError(
                     503 if error.retryable else 502,
-                    "The hosted model is unavailable; processing can be retried",
+                    f"Agent model failed: {error.public_detail}. "
+                    + (
+                        "Retry after the provider recovers or quota becomes available."
+                        if error.retryable
+                        else "Check the model configuration or response before retrying."
+                    ),
                 ) from error
             interrupts = result.get("__interrupt__") or ()
             return {
@@ -346,6 +386,7 @@ class AgentRunner:
                 "steps": result.get("steps", 0),
             }
         finally:
+            self._local.guard = None
             lock.release()
 
 

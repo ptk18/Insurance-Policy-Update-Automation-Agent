@@ -1,193 +1,161 @@
 # Design baseline and change record
 
-Last inspected: 2026-09-12. Read this file before work that touches the UI.
-Scope comes from [plan.md](plan.md); delivery tasks live in
-[process.md](process.md), especially U01–U07.
+Last inspected: 2026-09-12. Read before changing the UI. Scope comes from
+[plan.md](plan.md); delivery tasks live in [process.md](process.md).
 
-## Current baseline: no product UI implemented
+## Current baseline: Minimal review workspace (D003)
 
-The repository contains a FastAPI backend, generated API documentation, and a CLI
-smoke demo. There is no Next.js/React app, CSS, component library, design-token
-file, frontend test setup, or product screenshot baseline in the current tree.
+The Next.js/React dashboard is implemented in [frontend](../frontend/).
+Open port **3000** for the product; port 8000 `/docs` is the API explorer.
+The UI uses the existing backend and shows persisted synthetic case data.
+It creates no example cases until the guest submits a request.
 
-[workflow.png](workflow.png) illustrates the business process. It is not a visual
-specification for the dashboard. Swagger `/docs` is an API development interface;
-its styling and manual token entry are not the intended guest onboarding design.
+### Source of truth
 
-**No product visual changes have been implemented yet.** Do not treat colors,
-fonts, component styles, breakpoints, or layout choices as established decisions.
-The sections below separate existing behavior from proposed UI guidance and the
-decisions that must be recorded when the first interface is built.
+- [globals.css](../frontend/app/globals.css): visual roles, layouts, and shared
+  component states. Keep new visual rules here or extract a shared component;
+  do not introduce a second theme or inline one-off colors.
+- [types.ts](../frontend/lib/types.ts): shared status labels and API contracts.
+- [primitives.tsx](../frontend/components/primitives.tsx): status badges, notices,
+  native modal dialogs with focus restoration, and timestamp formatting.
+- [forms.tsx](../frontend/components/forms.tsx): intake, contact fields, edits,
+  rejection reasons, and evidence correction.
+- [dashboard.tsx](../frontend/components/dashboard.tsx): queue, counts, review,
+  request/evidence, and activity views.
 
-## Existing behavior the UI must preserve
+### Visual decisions
 
-These are product/backend constraints, not evidence of finished screens. Sources:
-[API](../src/policy_update/api.py), [service](../src/policy_update/service.py), and
-[schemas](../src/policy_update/schemas.py).
+- Palette: page `#f7f8f5`, white surfaces, ink `#243730`, secondary text `#66756e`,
+  borders `#e2e7e1`, primary green `#24674f`, hover `#194f3c`, focus `#39715d`.
+  Use the CSS semantic variables for success, information, warning, and error.
+- Typography: local Arial/Helvetica throughout. Main heading 24–26 px, case and
+  dialog headings 20–22 px, primary content 12–14 px. Use plain descriptive headings
+  and readable values. No display serif, slogans, or remote font requests.
+- Spacing: 4/8/12/16/20/24/32/40 px scale. Desktop canvas padding 24 px; mobile
+  padding 16 px. Radius 6 px for controls, 10 px for panels, 12 px for dialogs.
+- Layout: one compact top header with Policy desk, Sample library, and Help.
+  No sidebar, summary cards, decorative welcome illustration, or slogan footer.
+  The page has one New request action, search/status controls, and the queue beside
+  the review panel within a 1248 px canvas. Below 760 px the queue stacks above
+  detail. The mobile comparison groups each field with labeled value columns.
+- Navigation: show useful destinations as text buttons on desktop and mobile;
+  keep Review, Request & evidence, and Activity as the three detail tabs.
+  Counts belong next to the list title, not in another row of dashboard cards.
+- Icons: Lucide React only; 1.7 stroke width. Icons supplement text or have an
+  accessible label. Do not introduce another icon family.
+- Motion: short hover transitions and a spinner only for actual queued/running
+  activity; reduced-motion preference disables animations and transitions.
 
-- The workspace and selected broker are simulated. Explain the synthetic demo
-  context without exposing bearer tokens or backend internals in the product flow.
-- The only editable policy fields are mailing address, email, and phone. Read-only
-  identity context must not appear editable.
-- Display original request/replies, supporting evidence, validation findings,
-  and the exact current-versus-proposed values before approval.
-- A request is one unit. Missing or conflicting required evidence prevents approval
-  of all its changes; do not offer a waiver or a partial-apply shortcut.
-- Editing or adding a reply creates a new proposal version and invalidates prior
-  approval. Show that review is needed again without implying the old approval applies.
-- Approval is an explicit reviewer action tied to the version on screen. It is
-  separate from successful execution. Never show completion on approval alone.
-- Follow-ups and confirmations are drafts. Do not present a Send action or imply
-  that an email was delivered in the initial release.
-- The timeline presents actor, time, action, version, and outcome. Model tool
-  summaries, when added, must not expose hidden reasoning.
-- Denied access must not reveal historical policy values. Hiding a button does
-  not replace backend authorization.
+### Implemented interaction rules
 
-## Status vocabulary and intended presentation
+- Guest entry explains fictional data. Bearer credentials stay in an HttpOnly
+  SameSite=Strict cookie; the UI never asks a guest to copy an API token.
+- The request count and status filter derive from the authenticated workspace. Search matches
+  policy number, case identifier, or broker. Poll every two seconds while visible;
+  responses from earlier selections/actions are discarded.
+- Intake accepts English request text, an explicit policy number when available,
+  simulated broker context, optional structured contact changes, sample evidence,
+  and a text PDF up to 5 MB. Sample forms populate from the API fixtures.
+- A saved intake survives upload/queue failure; retrying the dialog continues that
+  case instead of creating another. No image/OCR claim is made.
+- Review exposes the original request/replies, evidence source and page, findings,
+  exact before/after values, unsent drafts, and historical versions.
+- Address evidence conflicts block the whole request. No partial approval or waiver.
+  Contact-only changes do not require address evidence.
+- Approve is explicitly bound to the displayed proposal version. Apply is a
+  separate action: `/resume` for a configured agent, `/execute` otherwise.
+  Approved never means applied. No automatic approval and no outbound email.
+- Edits/replies create a fresh version and invalidate approval. Dialogs capture the
+  opening version; polling cannot silently retarget the submission. On 409, retain
+  form input, close/refresh/review before another action. On 401/403/404, clear
+  unavailable detail, including any open review dialog.
+- Corrected PDFs are bound through a same-case reply. Stored files and fixture
+  documents download through authenticated routes; they are not public assets.
+- Persisted failed jobs show the sanitized error, attempts, retryability, and a
+  manual retry button. Queued/running jobs show no invented percentage.
+- Native dialogs trap focus and restore it on close; Escape closes an idle dialog.
+  Tabs support arrow/Home/End keys. Labels, focus rings, notices, and status words
+  must remain present; color alone must never communicate a state.
 
-The API values below exist now. The human-readable labels and action presentation
-are **proposed conventions for the first UI**, not shipped components. Record any
-changes when implementing them. Share one status mapping across list and detail;
-do not invent synonymous labels independently on each screen.
+### Shared status vocabulary
 
-- `processing` → **Processing**. The backend currently uses this as an initial
-  transient value; a durable worker/progress experience is pending. Do not fabricate
-  percentages, tool activity, or an active job when none exists.
-- `awaiting_information` → **Needs information**. Explain the blocking findings,
-  show the clarification draft, and provide the same-case reply/evidence path.
-  Approval is unavailable while findings remain unresolved.
-- `awaiting_approval` → **Ready for review**. Show the latest version and evidence
-  before offering Edit, Approve, and Reject.
-- `approved` → **Approved — update pending**. Keep this distinct from Completed.
-  Current execution requires a separate API call; future agent integration must
-  define how execution starts and how its progress is reflected.
-- `completed` → **Completed**. Show the persisted outcome and confirmation draft.
-  Keep history readable; do not offer proposal edits or another approval.
-- `rejected` → **Rejected**. Show the review decision/reason. The case is terminal;
-  no reopen path is implemented.
-- `blocked` → **Access blocked**. Explain denied broker access without exposing
-  policy values. Do not suggest that a new evidence upload can bypass access checks.
+`received` → Received; `processing` → Processing;
+`awaiting_information` → Needs information; `awaiting_approval` → Ready for review;
+`approved` → Approved · update pending; `completed` → Completed;
+`rejected` → Rejected; `blocked` → Access blocked.
 
-Proposal statuses are a separate concept: `invalid`, `pending`, `approved`,
-`superseded`, `rejected`, and `applied`. Show old versions as historical; a past
-approval on a superseded version must never look actionable.
+Job status is separate: queued, running, waiting, completed, or failed. A failed
+job must remain visible even if the case itself still says Received/Processing.
+Historical proposal states are shown as historical, never as current approval.
 
-There is no persisted failed/retryable job status yet. Until A06 is implemented,
-display actual API errors without claiming that a background retry is scheduled.
-For 409 responses, preserve unsaved input where possible and require a reload/
-comparison of the latest state before resubmitting an approval. For 401/403/404,
-show an appropriate unavailable/session state without leaking another guest's data.
+## Screenshot baseline and verification
 
-## Planned screen and component inventory
+The [browser suite](../frontend/tests/dashboard.spec.ts) captures these synthetic
+states with `CAPTURE_BASELINE=1 npm test` after a production build. Wide viewport
+is **1440 × 1050**, narrow **390 × 844**; full-page images may be taller.
 
-All items below are unimplemented. The first UI should cover the core flow before
-adding chat or inbox features.
+- [Guest entry](screenshots/welcome-wide.png), [empty workspace](screenshots/empty-wide.png).
+- [Ready for review](screenshots/ready-wide.png), [mobile review](screenshots/ready-mobile.png).
+- [Missing evidence](screenshots/missing-wide.png), [conflicting evidence](screenshots/conflicting-wide.png),
+  [corrected PDF](screenshots/corrected-wide.png).
+- [Approved/pending](screenshots/approved-wide.png), [completed](screenshots/completed-wide.png),
+  [rejected](screenshots/rejected-wide.png), [blocked access](screenshots/blocked-wide.png).
+- [Stale edit](screenshots/stale-version-wide.png), [failed processing](screenshots/failed-wide.png).
 
-- [ ] Guest entry and sample selection: explain fictional data and open an isolated
-  workspace without making the user manage technical credentials.
-- [ ] Request intake: pasted English email, simulated broker context, explicit
-  policy number where needed, attachment selection, and useful validation feedback.
-- [ ] Case list: consistent status labels, policy/request context, and a clear way
-  to open the next case requiring attention. Filtering details remain undecided.
-- [ ] Case detail: a readable hierarchy for request/replies, evidence/source viewer,
-  validation findings, and current/proposed contact values.
-- [ ] Review controls: editable proposal, version context, explicit approval,
-  rejection reason, and feedback when an edit or stale policy requires fresh review.
-- [ ] Information request and correction: clearly labeled draft, missing/conflicting
-  evidence explanation, same-case reply/upload, and resume feedback.
-- [ ] Execution outcome: pending/applied/failure presentation, backend-supported
-  retry, saved changes, and unsent confirmation draft.
-- [ ] Audit timeline: readable timestamps, actors/actions/outcomes, version history,
-  and supporting references with progressive detail where useful.
-- [ ] Shared primitives: buttons, fields, status badges, notices, loading/empty
-  states, and any dialogs introduced by the implemented flows.
+Checks cover the real local API with temporary SQLite data, rule-based processing,
+PDF inspection, and a scripted extraction failure/retry. They do not call Gemini.
+Keyboard tabs, dialog focus/escape, and horizontal overflow are checked in Chromium.
+Desktop/mobile review and evidence screenshots were visually inspected. These are
+reference images, not pixel-difference regression tests or an accessibility certification.
 
-Reuse one implementation of each shared pattern. Decide the case layout and
-navigation before duplicating structure across routes. This document does not
-prescribe a sidebar, modal, grid width, or other layout that has not been designed.
+Remaining: live-agent browser verification, Safari/Firefox, screen-reader and
+formal contrast audits, automated visual comparisons, slow-network/loading and
+large-queue behavior, and deployment. Image inspection and case chat stay deferred.
 
-## Visual foundations to establish in U01
+## Drift prevention
 
-**All values remain undecided.** When implementing the first screen, record the
-chosen values and link the actual token/component files here. Those shared code
-definitions should become the source of truth for visual values.
+Before changing a component, identify its states and inspect shared CSS and status
+mapping. Reuse the existing pattern. Run the affected synthetic browser scenario,
+check keyboard and narrow layouts, and compare screenshots. Update this record and
+[testing-guidelines.md](testing-guidelines.md) with actual evidence and remaining gaps.
+Do not change status/action wording separately in list and detail.
 
-- [ ] Color roles: page/surface backgrounds, text/muted text, border, primary action,
-  focus, and semantic information/warning/error/success states, including variants.
-- [ ] Typography: font family/fallbacks, body/label/heading sizes, line heights, and
-  weights; readable presentation for long policy values and document text.
-- [ ] Layout: spacing scale, content width, responsive breakpoints, list/detail
-  behavior on narrow screens, and placement of the review controls.
-- [ ] Shape and depth: field/button sizing, border widths, radii, shadows, and
-  overlay layers if needed.
-- [ ] Icons and motion: one icon source, consistent sizes, meaningful text labels,
-  restrained transitions, and reduced-motion behavior.
-- [ ] Shared component states: default, hover, focus, disabled, busy, error, and
-  success where meaningful. Do not encode status with color alone.
+## Change history
 
-Avoid per-screen colors, spacing, or type sizes that duplicate shared roles.
-When a real exception is needed, name its purpose in the change record and decide
-whether it should become a shared variant. A new library or visual theme is a
-deliberate design decision, not an incidental dependency choice.
+### D001 — 2026-09-12 — Backend-only inventory
 
-## UI verification and drift prevention
+Documentation only. The repository had no product components, CSS, or screenshots.
+It recorded plan-derived constraints and proposed status conventions. Verified by
+source inspection; no browser checks. That absence-of-UI baseline is superseded by
+D002; its authorization, approval, and draft constraints remain in force.
 
-For each UI change:
+### D002 — 2026-09-12 — First implemented review dashboard
 
-1. Identify the affected screen, component, and state above. Inspect existing
-   components/tokens before adding a new pattern.
-2. Check the same status/action wording in the case list, detail, and notices.
-   Preserve the difference between validated, approved, and applied.
-3. Verify the affected flow with synthetic data and real backend outcomes. Inspect
-   loading, empty, failure, disabled, long-content, and stale-version states when
-   applicable; do not rely only on a successful fixture screenshot.
-4. Check keyboard navigation, visible focus, labels/error association, readable
-   contrast, status announcement, and focus handling for any dialog. Verify narrow
-   and wide layouts with long addresses and evidence references.
-5. Save representative screenshots with the viewport, route, and case state, and
-   compare them to the current baseline. Store/link them in the change record when
-   the first UI exists; no screenshot directory or browser test suite exists yet.
-6. Update this file in the same change: implemented decisions, component/token
-   references, verification evidence, and remaining gaps. Update the test inventory
-   when adding browser/component/visual checks.
+Implemented the Policy desk visual system and core request-to-review workflow above.
+Added the current tokens, reusable forms/notices/dialogs, responsive queue/detail,
+source downloads, manual approval/application, correction/retry, and audit history.
+Browser checks exposed and fixed local origin validation and dialog focus restoration.
+Verification and screenshots are listed above; wider accessibility and hosted-agent
+validation remain open. Supersedes the visual absence recorded in D001.
 
-For the first baseline, capture ready-for-review, missing evidence, conflicting
-evidence, corrected evidence, approved/pending execution, completed, rejected,
-access blocked, and stale-proposal/error states. Capture transient worker/retry
-states once their backend behavior exists. Reuse these scenarios for future
-comparisons so a style change does not silently remove a workflow state.
+Append future decisions with date/ID, affected component/states, previous/new behavior,
+reason, shared-code references, screenshots/viewports, actual checks, and remaining work.
 
-## Design change record
 
-### 2026-09-12 — D001: document the pre-UI baseline
+### D003 — 2026-09-12 — Simplify the review workspace
 
-- **Status:** documentation only; no visual implementation.
-- **Observed:** backend data supports proposals, findings, history, and draft
-  messages. No frontend components, tokens, or product screenshots exist.
-- **Recorded:** plan-derived interaction constraints, proposed status labels,
-  an unimplemented component inventory, and the visual decisions still needed.
-- **Evidence:** current source tree, API/service/schemas linked above, and plan.
-- **Verification:** source inspection and documentation reference checks; no
-  browser, accessibility, or visual testing performed.
-- **Remaining:** U01–U07 and all unchecked design items in this file.
+Implemented at the user's request for a simple, minimal, easy-to-navigate UI.
+Removed the sidebar, four summary cards, decorative entry graphics, slogans, and
+footer. Replaced them with a compact header, short onboarding/empty-state copy,
+plain sans-serif headings, and direct access to the request queue. Sample library
+and Help remain visible as text buttons at all screen sizes. Shared statuses,
+version-bound actions, evidence handling, and the three review tabs are retained.
 
-Append an entry for each meaningful visual or interaction change. Use this form
-and distinguish proposed from implemented decisions:
+Source: dashboard.tsx and globals.css linked above. Removed obsolete decorative
+CSS rules. Updated the existing empty-state test selector and regenerated the
+reference screenshots for this baseline. Verification uses the existing nine
+isolated Chromium scenarios, production build, and TypeScript checks. Supersedes
+D002's layout/typography; its workflow and approval constraints remain in force.
 
-```text
-Date / decision ID / title:
-Status: proposed | implemented | superseded
-Screen/component and states affected:
-Previous behavior/appearance:
-New behavior/appearance and reason:
-Shared tokens/components changed (file references):
-Screenshots and viewport/case state:
-Checks actually performed:
-Remaining work or intentional exceptions:
-Supersedes decision ID (if applicable):
-```
-
-Keep history when a decision changes, and update the current baseline at the same
-time. Do not leave an obsolete choice presented as current or mark a proposed
-design as implemented without code and visual evidence.
+Future UI work should preserve this minimal baseline: add controls only when they
+help complete a request; avoid decorative panels, repeated counts, or promotional copy.

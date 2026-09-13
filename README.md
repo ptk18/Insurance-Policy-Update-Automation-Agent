@@ -16,10 +16,11 @@ replies, proposal edits, approval, rejection, simulated policy updates, and an
 audit timeline.
 
 Intake and processing are separate operations. `POST /cases` only stores the
-request (`received`); `POST /cases/{id}/process` runs authorization, validation,
-and proposal preparation in its own transaction, so a failed processing request
-leaves the stored intake ready to process again. Processing is currently a
-synchronous stand-in for the planned worker, not an agent run.
+request (`received`); `POST /cases/{id}/process` queues a durable job (answer
+`202`, case still `received`, `job.status` `queued`) that a worker claims and runs
+outside the request: authorization, validation, and proposal preparation happen
+in the worker's own transactions, so a failed run leaves the stored intake ready
+to run again. Poll `GET /cases/{id}` until `job.status` leaves `queued`/`running`.
 
 When an intake carries no structured `changes`, processing sends the request text
 to the configured hosted model (Gemini, text only) and asks for a fixed JSON shape:
@@ -63,19 +64,36 @@ exact approved version; `/execute` remains available as the manual path). The lo
 stops for human review with an `agent_stopped` finding when the model finishes
 without a proposal or reaches the tool-call budget (`AGENT_TOOL_BUDGET`, default
 12). Every attempt is recorded on a durable job (`job` in the case view:
-action, `running|waiting|completed|failed`, attempts, `retryable`, sanitized
-`last_error`) with `processing_failed`/`processing_finished` timeline events. A
-model failure mid-loop answers 503 (retryable) or 502 and leaves the case
+action, `queued|running|waiting|completed|failed`, attempts, `retryable`,
+sanitized `last_error`, `worker_id`, `lease_expires_at`) with
+`processing_queued`/`processing_failed`/`processing_finished` timeline events. A
+model failure mid-loop fails the job (retryable for an outage) and leaves the case
 `processing` with its checkpoint; `POST /cases/{id}/process` or `/retry` continues
-from the last completed step, and `/retry` is the only way past a job still marked
-`running` after a dead process. The timeline shows
-`agent_decision` (tool plus the model's one-sentence stated intent), `tool_called`,
-and `agent_finished` events — never hidden reasoning. Set `AGENT_LOOP=off` to keep
-rule-based processing with extraction only.
+from the last completed step. The timeline shows `agent_decision` (tool plus the
+model's one-sentence stated intent), `tool_called`, and `agent_finished` events —
+never hidden reasoning. Set `AGENT_LOOP=off` to keep rule-based processing with
+extraction only.
 
-**A separate worker process, image inspection, the Next.js dashboard, and
-deployment are still pending.** The loop runs inside the API request with an
-in-process per-case lock plus the job's `running` marker, so it is single-instance. Request text is untrusted input: the model
+The worker (`src/policy_update/worker.py`) owns every run, rule-based or agent.
+The queue is the `processing_jobs` table: a claim is a compare-and-set update that
+turns a `queued` job into `running` under this worker's ID and a lease
+(`JOB_LEASE_SECONDS`, default 90) that a heartbeat renews while the run is alive,
+and every processing step re-checks ownership inside its own transaction, so a
+worker that paused past its lease stops rather than acting on a case another
+worker has taken over. Any worker's poll sweeps lapsed leases back into the queue
+(`processing_stalled`) until `MAX_JOB_ATTEMPTS` (default 5), after which the job
+fails visibly for a manual `POST /cases/{id}/retry`. `WORKER_MODE=embedded` (the
+default) runs one worker thread inside the API process so a single `uvicorn` is a
+complete demo; `WORKER_MODE=external` makes the API queue only, with one or more
+`uv run python -m policy_update.worker` processes over the same database doing
+the work. `GET /health` reports the mode.
+
+The Next.js review dashboard in `frontend/` provides guest entry, sample intake,
+PDF uploads, a searchable case queue, before/after comparison, version-bound edits
+and approvals, rejection reasons, corrected evidence, processing/retry feedback,
+unsent drafts, and persisted activity. The browser polls the existing API; it does
+not run the agent itself. **Image inspection and deployment are still pending.**
+Request text is untrusted input: the model
 only extracts from it, and every extracted value is checked against the text.
 Callers may supply the policy number and structured changes explicitly; the
 extraction path fills them from the text when they are omitted. Address evidence
@@ -84,7 +102,8 @@ templates.
 
 ## Run locally
 
-Requirements: Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), and Node.js 22+ with npm
+for the dashboard (Next.js requires at least Node.js 20.9).
 
 ```sh
 uv sync --locked
@@ -92,24 +111,102 @@ cp .env.example .env   # add GEMINI_API_KEY to enable free-text extraction
 uv run uvicorn policy_update.api:create_app --factory --reload
 ```
 
+That single process also runs the job worker (`WORKER_MODE=embedded`). To run the
+worker separately — the deployment shape — start the API with
+`WORKER_MODE=external` and, in another terminal over the same `DATABASE_URL`:
+
+```sh
+uv run python -m policy_update.worker
+```
+
+### Open the dashboard
+
+Keep the API and any external worker running. In another terminal:
+
+```sh
+cd frontend
+npm ci
+npm run dev
+```
+
+Open <http://127.0.0.1:3000> and choose **Open demo workspace**, then **New request**.
+If port 3000 is occupied, use `npm run dev -- --port 3002` and open
+<http://127.0.0.1:3002> instead.
+Use a sample or paste a request, review the proposed changes, choose **Approve v…**,
+then **Apply approved update**. With the agent enabled, applying queues `/resume`;
+without it, the dashboard calls the version-bound `/execute` endpoint. A reply
+revalidates evidence immediately; **Resume processing** is available when the
+configured agent still needs to continue an information request.
+
+The frontend connects to `http://127.0.0.1:8000` by default. For a different API,
+start it with `env POLICY_API_URL=http://127.0.0.1:8001 npm run dev`. This variable is
+server-only. Do not put the Gemini key in the frontend or a `NEXT_PUBLIC_*` variable.
+Guest bearer tokens stay in an HttpOnly, SameSite=Strict cookie; same-origin Next.js
+routes forward authenticated calls and downloads. A browser workspace is separate
+from workspaces created by the CLI demo or Swagger. Existing cases in those other
+workspaces do not automatically appear here. The cookie lasts seven days; backend
+guest cleanup/expiry is still pending.
+
+For a production build, run `npm run build` followed by `npm start`. Browser tests
+and screenshot regeneration are documented in the [testing guide](_docs/testing-guidelines.md).
+
+### Backend configuration
+
+The API owns schema bootstrap; a worker started first waits until the tables
+exist. Keep `JOB_LEASE_SECONDS` (default 90) at least twice the longest single
+step — a hosted-model call is bounded at about 70 s including its retry — because
+the heartbeat renews the lease at a third of its length and waits for the step's
+row lock on PostgreSQL.
+
 The app factory loads `.env` from the working directory (or the file named by
 `POLICY_UPDATE_ENV_FILE`) without overriding variables already set in the shell.
 `.env` is gitignored; keep keys out of commits, logs, and issue reports. The key is
 sent only in the `x-goog-api-key` header. Without `GEMINI_API_KEY`, `GET /health`
 reports `"extraction": "unconfigured"` and free-text intake pauses for a reviewer.
 `GEMINI_MODEL` overrides the default `gemini-3.8-flash`. Free-tier requests are
-rate limited and may answer 429/503; the adapter retries once, then reports 503 so
-`POST /cases/{id}/process` can be repeated later. An agent run makes roughly five
+rate limited and may answer 429/503; the adapter retries once, then the job fails
+as retryable so `POST /cases/{id}/retry` can continue it later. An agent run makes roughly five
 to seven model calls per case, so a full demo can exhaust the free per-minute quota
 of the larger Flash models; `GEMINI_MODEL=gemini-3.5-flash-lite` has more headroom
 and completed the demo scenarios.
 
 Open <http://127.0.0.1:8000/docs> for the interactive review API. SQLite persists to
-`policy_demo.db` by default. Startup creates missing tables (including the new
-`attachments` table); it does not reset data and does not add columns to existing
-tables. A `policy_demo.db` created before the `cases.requested_changes` column
-existed must be deleted or replaced with a fresh `DATABASE_URL`; versioned
-migrations are still pending.
+`policy_demo.db` by default. Startup creates missing tables and adds missing
+*nullable* columns (such as the job lease columns) to existing ones; it never
+resets data. A `policy_demo.db` created before the non-nullable
+`cases.requested_changes` column existed must still be deleted or replaced with a
+fresh `DATABASE_URL`; versioned migrations are still pending.
+
+### Troubleshooting processing and retries
+
+`GET /` and `/favicon.ico` on **port 8000** return 404 because this port serves the
+API. The dashboard runs on **port 3000**; `/docs` on port 8000 is the API explorer.
+`POST /cases/{id}/process` returning 202 means the job was queued, not
+that model processing succeeded. Repeated 200 responses from `GET /cases/{id}`
+are normal polling; inspect the response's `job.status` and `job.last_error`.
+
+Model failures now retain an allowlisted diagnostic such as `HTTP 429
+RESOURCE_EXHAUSTED`, `HTTP 503 UNAVAILABLE`, `HTTP 401 UNAUTHENTICATED`, or
+`ReadTimeout`. For quota errors, check the project's model limits in AI Studio
+and retry after quota is available; for authentication/configuration errors, fix
+the configuration first. Do not assume every retryable error is a quota problem.
+An older saved generic error cannot be diagnosed retroactively.
+
+Restart both the API and separate worker after code or model-configuration changes.
+To use the separate-worker setup explicitly, run these in different terminals
+from the same project directory:
+
+```sh
+env WORKER_MODE=external uv run uvicorn policy_update.api:create_app --factory
+uv run python -m policy_update.worker
+```
+
+`/health` reports the API's worker mode. Without `external`, the API also runs an
+embedded worker that may claim the job before the separate worker. After correcting
+the cause, retry the existing case through `/cases/{id}/retry` using its guest
+session; the worker continues its saved checkpoint.
+
+### Run the smoke scenarios
 
 In another terminal, run the scenarios (contact-only, missing evidence with a
 reply, conflicting evidence with a corrected reply, a conflicting uploaded PDF
@@ -123,9 +220,10 @@ uv run python scripts/demo.py
 The script creates a new isolated guest, submits and processes each intake,
 performs simulated reviewer approvals, executes each update, and checks duplicate
 execution. It keeps the guest token in memory and never prints it. This is an API
-smoke demo; with a configured key every `/process` is a live agent run and the
-script prints the tool sequence the model chose, retries on 502/503, and resumes
-the loop after each approval.
+smoke demo; it polls each queued job until the worker finishes it, retries a
+retryable job failure through `/retry`, and — with a configured key, when every
+`/process` is a live agent run — prints the tool sequence the model chose and
+resumes the loop after each approval.
 
 For manual review through `/docs`:
 
@@ -137,10 +235,12 @@ For manual review through `/docs`:
 3. Optionally download a sample document from `GET /fixtures/documents/{id}` and
    upload it with `POST /cases/{id}/attachments`. An upload to a `received` case
    becomes its evidence; the response shows the inspection result and page.
-4. Call `POST /cases/{id}/process`, then inspect the returned case's before/after
-   values, findings, evidence source, and (in agent mode) the `agent_decision` and
-   `tool_called` timeline entries. Processing a completed case returns 409; a case
-   left `processing` by a model failure continues where it stopped.
+4. Call `POST /cases/{id}/process` (answer `202`: the job is queued), then
+   `GET /cases/{id}` once `job.status` is no longer `queued`/`running` and inspect
+   the before/after values, findings, evidence source, and (in agent mode) the
+   `agent_decision` and `tool_called` timeline entries. Processing a completed case
+   returns 409; a case left `processing` by a model failure continues where it
+   stopped through `/process` or `/retry`.
 5. For missing/conflicting evidence, call `POST /cases/{id}/replies` with
    `{"expected_version": 1, "text": "Corrected evidence", "evidence_id": ...}` where
    `evidence_id` is a fixture name such as `matching-address` or the ID of an
@@ -226,9 +326,9 @@ run yet, so no broader prompt-injection resistance claim is made.
 
 ## Next implementation steps
 
-1. Move the loop into a worker process with stale-job detection, and add image
-   document inspection through the model adapter.
-2. Build the Next.js review dashboard around these endpoints.
+1. Add image document inspection through the model adapter.
+2. Verify the dashboard against the live agent and expand cross-browser and
+   accessibility checks; the local core flows are covered with synthetic data.
 3. Add database migrations, guest lifecycle limits, containers, and deployment;
    run the complete acceptance scenarios in the hosted environment.
 

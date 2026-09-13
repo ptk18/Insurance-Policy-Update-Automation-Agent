@@ -53,12 +53,37 @@ def main():
         calls = [e["details"]["tool"] for e in case["timeline"] if e["action"] == "tool_called"]
         return " -> ".join(calls) if calls else "rule-based processing"
 
+    def wait_for_job(path, timeout=240):
+        # /process, /resume, and /retry only queue a job; the worker runs it outside
+        # the request. Poll the case until the job leaves queued/running.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            case = request("GET", path)
+            if case["job"]["status"] not in {"queued", "running"}:
+                return case
+            time.sleep(0.5)
+        raise RuntimeError("The worker did not finish the job in time")
+
+    def run(path, route):
+        # A retryable job failure (hosted-model 503) leaves the case with its
+        # checkpoint; /retry continues from the last completed step.
+        request("POST", path + "/" + route)
+        for attempt in range(4):
+            case = wait_for_job(path)
+            if case["job"]["status"] != "failed":
+                return case
+            if not case["job"]["retryable"] or attempt == 3:
+                raise RuntimeError(f"Processing failed: {case['job']['last_error']}")
+            print(f"  processing failed ({case['job']['last_error']}); retrying")
+            time.sleep(8)
+            request("POST", path + "/retry")
+
     def complete(path, case):
         # Approval is always the reviewer's call; the agent only applies it afterwards.
         version = {"version": case["current_version"]}
         request("POST", path + "/approve", version)
         if agent:
-            case = request("POST", path + "/resume")
+            case = run(path, "resume")
             print(f"  agent resumed after approval: {case['status']} ({tools_used(case)})")
         receipt = request("POST", path + "/execute", version)
         repeated = request("POST", path + "/execute", version)
@@ -67,16 +92,7 @@ def main():
         return request("GET", path)
 
     def process(path):
-        # A hosted-model 503/502 leaves the case `processing` with its checkpoint;
-        # calling /process again continues from the last completed step.
-        for attempt in range(4):
-            try:
-                return request("POST", path + "/process")
-            except HTTPError as error:
-                if error.code not in (502, 503) or attempt == 3:
-                    raise
-                print(f"  model unavailable (HTTP {error.code}); retrying processing")
-                time.sleep(8)
+        return run(path, "process")
 
     samples = request("GET", "/fixtures")["samples"]
     for sample in (samples[0], samples[2], samples[3]):
