@@ -347,6 +347,31 @@ chat (L01), and real inbox integration (L02) stay deferred.
 
 ## Latest verification — 2026-09-13
 
+D008: compact buttons with 14px labels and smaller padding/icons; larger reading
+text retained. A deeper orange action shade keeps white labels readable. Formatting,
+TypeScript, build, and 11/11 Chromium workflow/accessibility checks passed. Updated
+reference images and visually inspected desktop/mobile review. No model calls.
+
+D007: all orange buttons now share white text/icons and the bold readable label
+style. Formatting, TypeScript, build, and 11/11 Chromium workflow/accessibility
+checks passed. Refreshed reference screenshots and inspected desktop/mobile states.
+
+D006: increased body/supporting text and changed New request to a bold white label
+and icon. Fixed keyboard access to the taller dialog while saving. Formatting,
+TypeScript, and build passed; 30 browser checks passed initially, followed by all
+six affected checks after the focus fix. Desktop/mobile and saving screenshots
+were refreshed and inspected. No hosted model calls.
+
+UI refinement (D005): Sunday orange `#FA4616`, warm neutrals, larger controls and
+supporting text, simpler dashboard/form/help copy, and a shared subtle notice for
+English text and readable PDF support are implemented. Sample document options are
+collapsed. Frontend formatting, TypeScript, build, and **33/33** Chromium/Firefox/
+WebKit checks passed, including axe contrast/accessibility. All 14 reference images
+were refreshed; desktop/mobile review and saving intake were visually inspected.
+Backend behavior is unchanged; this verification uses isolated synthetic data and
+scripted extraction, with no hosted model calls. See [design decisions](design-system.md).
+
+
 Pre-commit review; automated checks use synthetic data and no hosted model.
 
 - Backend: **106/106 on SQLite and PostgreSQL 17**. Retained-data migrations also

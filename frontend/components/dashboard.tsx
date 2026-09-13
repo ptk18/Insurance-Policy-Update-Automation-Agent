@@ -29,7 +29,7 @@ import {
   type Health,
   type Proposal,
 } from "@/lib/types";
-import { Badge, date, Dialog, Notice } from "./primitives";
+import { Badge, date, Dialog, Notice, SupportNote } from "./primitives";
 import { IntakeDialog, ReviewDialog } from "./forms";
 
 type Modal = "intake" | "edit" | "reject" | "reply" | "samples" | "help" | null;
@@ -207,7 +207,7 @@ export default function Dashboard() {
           ? `Version ${snapshot.current_version} approved. Apply the update when ready.`
           : name === "execute"
             ? "The approved update was applied."
-            : "Processing queued. Progress will appear here automatically.",
+            : "Your request is queued. Progress will appear here automatically.",
       );
     } catch (e) {
       fail(e);
@@ -269,7 +269,9 @@ export default function Dashboard() {
           <div className="page-heading">
             <div>
               <h1>Policy requests</h1>
-              <p>Review and approve contact updates.</p>
+              <p>
+                Manage mailing address, email, and phone updates in one place.
+              </p>
             </div>
             {connected && (
               <button
@@ -334,7 +336,8 @@ export default function Dashboard() {
             <section className="welcome">
               <h2>Open a review workspace</h2>
               <p>
-                Try policy updates with fictional records. No sign-up required.
+                Try a request, review the details, and approve the update. This
+                demo uses fictional records. No sign-up needed.
               </p>
               <button
                 className="button primary"
@@ -349,7 +352,7 @@ export default function Dashboard() {
               <div className="queue-toolbar">
                 <div>
                   <h2>
-                    Request queue <span className="count">{cases.length}</span>
+                    Your requests <span className="count">{cases.length}</span>
                   </h2>
                 </div>
                 <div className="queue-controls">
@@ -390,7 +393,10 @@ export default function Dashboard() {
               {!cases.length ? (
                 <section className="empty-state first-case">
                   <h2>No requests yet</h2>
-                  <p>Create a request from a broker email or a sample.</p>
+                  <p>
+                    Start with a broker email or try a sample. We’ll help
+                    prepare the changes for review.
+                  </p>
                   <button
                     className="button primary"
                     onClick={(event) => {
@@ -408,7 +414,7 @@ export default function Dashboard() {
                       setModal("samples");
                     }}
                   >
-                    Explore sample documents <ArrowRight size={15} />
+                    Browse sample documents <ArrowRight size={15} />
                   </button>
                 </section>
               ) : (
@@ -417,9 +423,9 @@ export default function Dashboard() {
                 >
                   <section className="case-list" aria-label="Requests">
                     <div className="list-heading">
-                      {filtered.length} REQUEST
-                      {filtered.length === 1 ? "" : "S"}
-                      <span>NEWEST FIRST</span>
+                      {filtered.length} request
+                      {filtered.length === 1 ? "" : "s"}
+                      <span>Newest first</span>
                     </div>
                     {!filtered.length && (
                       <div className="list-empty">
@@ -464,13 +470,15 @@ export default function Dashboard() {
                         </div>
                         {c.job_status === "failed" && (
                           <span className="row-error">
-                            Processing failed · open for details
+                            Needs attention · view details
                           </span>
                         )}
                         {["queued", "running"].includes(c.job_status || "") && (
                           <span className="row-progress">
                             <LoaderCircle size={12} className="spin" />
-                            Processing {c.job_status}
+                            {c.job_status === "queued"
+                              ? "Waiting to start"
+                              : "Preparing changes…"}
                           </span>
                         )}
                       </button>
@@ -499,7 +507,7 @@ export default function Dashboard() {
                         <div className="detail-heading">
                           <div className="detail-title">
                             <span className="eyebrow">
-                              REQUEST {record.id.slice(0, 8)}
+                              Request {record.id.slice(0, 8)}
                             </span>
                             <h2>
                               {record.policy_number || "Policy to confirm"}
@@ -606,7 +614,7 @@ export default function Dashboard() {
                               <div>
                                 <strong>
                                   {record.job?.status === "queued"
-                                    ? "Waiting for the worker"
+                                    ? "Waiting to start"
                                     : "Preparing this request"}
                                 </strong>
                                 <p>
@@ -679,9 +687,9 @@ export default function Dashboard() {
                               )}
                               {record.status === "completed" && (
                                 <Notice tone="success">
-                                  Version {record.current_version} was applied
-                                  successfully. The saved changes and update
-                                  event are available in Activity.
+                                  The policy has been updated. View Activity for
+                                  the record of this update (version{" "}
+                                  {record.current_version}).
                                 </Notice>
                               )}
                               {record.status === "rejected" && (
@@ -702,7 +710,7 @@ export default function Dashboard() {
                               <div className="section-block">
                                 <div className="section-label">
                                   <Mail size={16} />
-                                  ORIGINAL REQUEST
+                                  Original email
                                 </div>
                                 <p className="request-text">
                                   {record.original_request}
@@ -711,7 +719,7 @@ export default function Dashboard() {
                               {record.replies.map((reply, i) => (
                                 <div className="section-block" key={i}>
                                   <div className="section-label">
-                                    REPLY {i + 1} · {date(reply.created_at)}
+                                    Reply {i + 1} · {date(reply.created_at)}
                                   </div>
                                   <p className="request-text">{reply.text}</p>
                                 </div>
@@ -721,7 +729,7 @@ export default function Dashboard() {
                                 proposal={proposal}
                               />
                               <h3>
-                                Stored attachments{" "}
+                                Attachments{" "}
                                 <span className="count">
                                   {record.attachments.length}
                                 </span>
@@ -735,7 +743,7 @@ export default function Dashboard() {
                                       <small>
                                         {Math.ceil(a.size / 1024)} KB ·{" "}
                                         {a.inspection.certain
-                                          ? "Text fields inspected"
+                                          ? "Document text checked"
                                           : "Needs verification"}
                                         {a.id === record.evidence_id
                                           ? " · Current evidence"
@@ -757,8 +765,8 @@ export default function Dashboard() {
                                 ))
                               ) : (
                                 <p className="muted">
-                                  No uploaded documents. Synthetic fixtures are
-                                  shown above when selected.
+                                  No files uploaded. Any sample document used
+                                  for this request appears above.
                                 </p>
                               )}
                             </>
@@ -767,7 +775,7 @@ export default function Dashboard() {
                             <>
                               <div className="section-label">
                                 <Clock3 size={16} />
-                                PERSISTED ACTIVITY
+                                Request history
                               </div>
                               <ol className="timeline">
                                 {record.timeline.toReversed().map((e) => (
@@ -790,9 +798,7 @@ export default function Dashboard() {
                                       </small>
                                       {Object.keys(e.details).length > 0 && (
                                         <details>
-                                          <summary>
-                                            View recorded outcome
-                                          </summary>
+                                          <summary>View details</summary>
                                           <pre>
                                             {JSON.stringify(e.details, null, 2)}
                                           </pre>
@@ -828,8 +834,8 @@ export default function Dashboard() {
                                   : `Reviewing version ${record.current_version}`}
                                 <small>
                                   {record.status === "awaiting_information"
-                                    ? "Resolve every finding before approval."
-                                    : "Your approval applies to these exact changes."}
+                                    ? "Add the missing or corrected information to continue."
+                                    : "Approval is for this version only."}
                                 </small>
                               </span>
                             </div>
@@ -930,10 +936,11 @@ export default function Dashboard() {
         <Dialog title="Sample document library" close={() => setModal(null)}>
           <div className="dialog-body">
             <p className="muted">
-              Download a fictional statement, then attach it to a request. PDF
-              inspection reads labeled account-holder and service-address text;
-              scans and images remain uncertain.
+              Download a sample document to try an address change. Each file
+              uses fictional details; some examples intentionally need
+              correction.
             </p>
+            <SupportNote />
             {fixtures.documents.map((doc) => (
               <a
                 className="sample-document"
@@ -967,22 +974,25 @@ export default function Dashboard() {
           <div className="dialog-body">
             <ol className="help-steps">
               <li>
-                <strong>Bring in a request.</strong> Paste an English broker
-                email or choose a sample. Only address, email, and phone changes
-                are supported.
+                <strong>Add an email.</strong> Paste the broker’s email or try a
+                sample. Include the policy number and requested address, email,
+                or phone changes. Attach proof of address for an address change.
               </li>
               <li>
-                <strong>Check the details.</strong> Compare current and proposed
-                values, review evidence, and resolve any findings.
+                <strong>Review the changes.</strong> Compare the current and new
+                details. If anything is missing or doesn’t match, add the
+                corrected information and check again.
               </li>
               <li>
-                <strong>Make the decision.</strong> Approve the exact version,
-                then apply it. Edits and replies require fresh approval.
+                <strong>Approve, then apply.</strong> Approve the version you’ve
+                reviewed, then choose Apply approved update to save it. Any
+                edits or replies need a new review and approval.
               </li>
             </ol>
+            <SupportNote />
             <Notice tone="info">
-              This demo uses fictional policies and simulated brokers.
-              Follow-ups and confirmations are unsent drafts.
+              This is a demo with fictional policies and brokers. Email drafts
+              are saved here; nothing is sent.
             </Notice>
             <button className="button primary" onClick={() => setModal(null)}>
               Got it
@@ -1003,7 +1013,7 @@ function Draft({ title, text }: { title: string; text: string }) {
       <div className="section-label">
         <Mail size={16} />
         {title}
-        <span className="pill">UNSENT</span>
+        <span className="pill">Not sent</span>
       </div>
       <p className="request-text">{text}</p>
     </section>
@@ -1020,15 +1030,16 @@ function Comparison({
   if (!entries.length)
     return (
       <p className="muted">
-        No contact changes have been prepared. Add them using Edit changes.
+        No changes to review yet. Choose Edit changes to add the requested
+        details.
       </p>
     );
   return (
     <div className="comparison" role="table" aria-label="Policy changes">
       <div className="comparison-head" role="row">
-        <span role="columnheader">FIELD</span>
-        <span role="columnheader">{applied ? "PREVIOUS" : "CURRENT"}</span>
-        <span role="columnheader">{applied ? "APPLIED" : "PROPOSED"}</span>
+        <span role="columnheader">Detail</span>
+        <span role="columnheader">{applied ? "Previous" : "Current"}</span>
+        <span role="columnheader">{applied ? "Updated" : "Proposed"}</span>
       </div>
       {entries.map(([key, value]) => (
         <div className="comparison-row" role="row" key={key}>
@@ -1043,7 +1054,7 @@ function Comparison({
           <span
             role="cell"
             className="after-value"
-            data-label={applied ? "Applied" : "Proposed"}
+            data-label={applied ? "Updated" : "Proposed"}
           >
             <ArrowRight size={14} />
             {value}
@@ -1082,8 +1093,8 @@ function ReviewSummary({
           </strong>
           <p>
             {proposal.findings.length
-              ? "The whole request is on hold until these findings are resolved."
-              : "The proposed contact changes passed the recorded validation checks."}
+              ? "Add or correct the information below to continue."
+              : "No issues found in the required checks."}
           </p>
         </div>
       </div>
@@ -1106,7 +1117,11 @@ function ReviewSummary({
                 : "Proposed changes"}
               <span className="version-tag">v{proposal.version}</span>
             </h3>
-            <p>Compare each value before making your decision.</p>
+            <p>
+              {record.status === "completed"
+                ? "These changes are now saved on the policy."
+                : "Check the details below before approving."}
+            </p>
           </div>
           {edit && (
             <button
@@ -1145,12 +1160,12 @@ function EvidencePanel({
     <section className="evidence-card">
       <div className="section-label">
         <FileCheck2 size={16} />
-        SUPPORTING EVIDENCE
+        Proof of address
         {source && (
           <span className="pill">
             {source.kind === "synthetic_fixture"
-              ? "SYNTHETIC FIXTURE"
-              : "DOCUMENT"}
+              ? "Sample document"
+              : "Uploaded document"}
           </span>
         )}
       </div>
@@ -1158,7 +1173,7 @@ function EvidencePanel({
         <p className="muted">
           {proposal?.changes.mailing_address
             ? "Proof of address is required for this change."
-            : "No evidence selected. Contact-only changes do not require an address document."}
+            : "No document needed for email or phone changes."}
         </p>
       ) : (
         <>
@@ -1168,14 +1183,14 @@ function EvidencePanel({
               "Selected evidence"}
           </strong>
           <p>
-            {evidence.name || "Account holder unresolved"}
+            {evidence.name || "Name could not be read"}
             <br />
-            {evidence.address || "Address unresolved"}
+            {evidence.address || "Address could not be read"}
           </p>
           <div className="evidence-footer">
             <span>
               {evidence.certain && evidence.readable
-                ? "Text fields inspected"
+                ? "Document text checked"
                 : "Needs verification"}
               {source?.kind !== "synthetic_fixture" && source?.page
                 ? ` · Page ${source.page}`

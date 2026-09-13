@@ -515,6 +515,8 @@ engine, 33 checks across Chromium, Firefox, and WebKit**:
 1. Guest entry, contact intake, comparison, separate approval/application, confirmation
    draft, persisted activity, and reload.
 2. Delayed intake disables duplicate submission, retains the modal, and saves one case.
+   The close control stays keyboard-focusable while saving; Enter and Escape do
+   not dismiss the busy dialog. Axe checks the scrollable saving state.
 3. An invalid guest cookie clears the previous case selection and allows a fresh
    workspace.
 4. Missing evidence blocks approval; a corrected PDF/reply creates version 2.
@@ -527,6 +529,35 @@ engine, 33 checks across Chromium, Firefox, and WebKit**:
 10. Narrow viewport, keyboard tabs, dialog Escape/focus restoration, and a mocked
     approval outage that remains an error.
 11. A scripted extraction 429 is persisted, shown safely, and retried to a proposal.
+
+
+
+
+D008 verification: formatting, TypeScript, production build, and all 11 Chromium
+workflow checks passed, including axe contrast, keyboard/dialog behavior, and mobile
+layout. Reference screenshots were refreshed; desktop and 390px mobile review states
+were visually inspected. Existing coverage is unchanged. Synthetic data only; no
+hosted model calls. Firefox/WebKit were not rerun for this CSS-only refinement.
+
+D007 verification: formatting, TypeScript, production build, and all 11 Chromium
+workflow checks passed, including axe contrast, keyboard/dialog behavior, and mobile
+layout. Refreshed reference screenshots; desktop approved and mobile review states
+were visually inspected. Synthetic data only; no hosted model calls. Firefox/WebKit
+were not rerun for this shared color/style change.
+
+D006 verification: formatting, TypeScript, and production build passed. The full
+browser run passed 30 checks and exposed the saving-dialog focus issue in all three
+engines. After the fix, all six affected saving/keyboard/mobile checks passed across
+Chromium, Firefox, and WebKit, including axe contrast and keyboard focus checks.
+Refreshed reference images; desktop/mobile review and saving intake were visually
+inspected. Synthetic data and scripted extraction only; no hosted model calls.
+
+D005 UI refinement (2026-09-13): all **33/33** checks passed again with the Sunday
+orange palette and revised copy. Existing selectors now use Paste email, Submit
+request, Save & check again, and Document text checked; the scenario inventory is
+unchanged. Formatting, TypeScript, and production build passed. Regenerated all 14
+reference screenshots and visually reviewed the desktop/mobile review and saving
+intake states. These checks use synthetic data and scripted extraction only.
 
 The capture helper runs axe WCAG A/AA checks on saved states and the delayed-intake
 modal in each engine. Screenshot files are generated only when requested, in Chromium;

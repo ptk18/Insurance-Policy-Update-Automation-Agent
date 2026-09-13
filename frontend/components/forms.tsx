@@ -12,7 +12,7 @@ import {
   type Health,
   type Intake,
 } from "@/lib/types";
-import { Dialog, Notice } from "./primitives";
+import { Dialog, Notice, SupportNote } from "./primitives";
 
 export function ChangeFields({
   values,
@@ -89,7 +89,9 @@ export function IntakeDialog({
     let id = createdId;
     try {
       if (file && (file.size > 5 * 1024 * 1024 || file.size === 0))
-        throw new Error("Choose a nonempty PDF up to 5 MB.");
+        throw new Error(
+          "Choose a PDF that is not empty and is no larger than 5 MB.",
+        );
       if (!id) {
         const payload: Intake = {
           broker_id: input.broker_id,
@@ -123,11 +125,11 @@ export function IntakeDialog({
     }
   }
   return (
-    <Dialog title="New policy request" close={close} busy={busy}>
+    <Dialog title="New request" close={close} busy={busy}>
       <form onSubmit={submit} className="dialog-body">
         <p className="muted">
-          Paste a broker request or start with a fictional example. You’ll
-          review every change before it is applied.
+          Paste an email or try a sample. You’ll review the changes before
+          approving an update.
         </p>
         {error && (
           <Notice>
@@ -181,8 +183,9 @@ export function IntakeDialog({
             </label>
           </div>
           <label>
-            Original request
+            Paste email
             <textarea
+              aria-describedby="intake-support"
               required
               rows={5}
               maxLength={20000}
@@ -193,6 +196,7 @@ export function IntakeDialog({
               }
             />
           </label>
+          <SupportNote id="intake-support" />
           <label className="checkbox">
             <input
               type="checkbox"
@@ -205,45 +209,49 @@ export function IntakeDialog({
             <ChangeFields values={changes} setValues={setChanges} />
           ) : (
             <p className="field-help">
-              The configured text model will extract the requested contact
-              changes.
-              {health?.extraction === "unconfigured" &&
-                " No model is currently connected; enter changes yourself to run this demo."}
+              {health?.extraction === "unconfigured"
+                ? "Automatic reading is unavailable. Select the option above to enter changes yourself."
+                : "We’ll read the email and prepare the changes for your review."}
             </p>
           )}
-          <label>
-            Sample evidence
-            <select
-              value={input.evidence_id || ""}
-              onChange={(e) =>
-                setInput({ ...input, evidence_id: e.target.value || undefined })
-              }
-            >
-              <option value="">No sample evidence</option>
-              {Object.keys(fixtures.evidence).map((id) => (
-                <option key={id} value={id}>
-                  {id.replaceAll("-", " ")} (synthetic fixture)
-                </option>
-              ))}
-            </select>
-          </label>
+          <details className="sample-options">
+            <summary>Sample document options</summary>
+            <label>
+              Sample document
+              <select
+                value={input.evidence_id || ""}
+                onChange={(e) =>
+                  setInput({
+                    ...input,
+                    evidence_id: e.target.value || undefined,
+                  })
+                }
+              >
+                <option value="">No sample document</option>
+                {Object.keys(fixtures.evidence).map((id) => (
+                  <option key={id} value={id}>
+                    {id.replaceAll("-", " ")} (sample)
+                  </option>
+                ))}
+              </select>
+            </label>
+          </details>
         </fieldset>
         <label className="upload">
           <FileUp size={20} />
           <span>
-            Attach a text PDF{" "}
-            <span className="optional">optional · up to 5 MB</span>
+            Upload document <span className="optional">optional</span>
           </span>
           <input
-            aria-label="Attach a text PDF"
+            aria-label="Upload document"
             type="file"
             accept="application/pdf,.pdf"
             disabled={busy || uploaded}
             onChange={(e) => setFile(e.target.files?.[0] || null)}
           />
           <small>
-            A PDF replaces sample evidence. Scans and image inspection are not
-            supported yet.
+            PDF · up to 5 MB. Needed for address changes only. An upload
+            replaces the sample document.
           </small>
         </label>
         <div className="dialog-actions">
@@ -262,8 +270,8 @@ export function IntakeDialog({
             {busy
               ? "Saving request…"
               : createdId
-                ? "Retry remaining steps"
-                : "Create & process request"}
+                ? "Continue request"
+                : "Submit request"}
           </button>
         </div>
       </form>
@@ -353,7 +361,7 @@ export function ReviewDialog({
         result,
         kind === "reject"
           ? "Request rejected. No policy update was applied."
-          : `Version ${result.current_version} created. Any previous approval has been invalidated.`,
+          : `Version ${result.current_version} created. Review the updated details before approving.`,
       );
       close();
     } catch (e) {
@@ -380,8 +388,8 @@ export function ReviewDialog({
       <form className="dialog-body" onSubmit={submit}>
         <p className="muted">
           {kind === "reject"
-            ? "Record why this request should not proceed. Rejection closes the case."
-            : "This creates a new version and requires fresh review."}{" "}
+            ? "Add a reason to close this request without applying changes."
+            : "Saving changes creates a new version for review."}{" "}
           Reviewing version {snapshot.current_version}.
         </p>
         {error && (
@@ -415,7 +423,7 @@ export function ReviewDialog({
           {kind === "reply" && (
             <>
               <label>
-                Explicit policy number
+                Policy number
                 <input
                   value={policy}
                   maxLength={80}
@@ -438,7 +446,7 @@ export function ReviewDialog({
                   ))}
                   {Object.keys(fixtures.evidence).map((id) => (
                     <option key={id} value={id}>
-                      {id.replaceAll("-", " ")} (synthetic fixture)
+                      {id.replaceAll("-", " ")} (sample)
                     </option>
                   ))}
                 </select>
@@ -452,9 +460,10 @@ export function ReviewDialog({
                   onChange={(e) => setFile(e.target.files?.[0] || null)}
                 />
               </label>
+              <SupportNote />
               <p className="field-help">
-                An uploaded PDF replaces the selected evidence when this reply
-                is saved.
+                The new PDF replaces the selected document when you save. To
+                change contact details, use Edit changes after saving.
               </p>
             </>
           )}
@@ -478,7 +487,7 @@ export function ReviewDialog({
                 ? "Save new version"
                 : kind === "reject"
                   ? "Reject request"
-                  : "Save reply & revalidate"}
+                  : "Save & check again"}
           </button>
         </div>
       </form>

@@ -17,7 +17,7 @@ async function create(page: Page, sample = "0", broker?: string) {
   await page.getByRole("button", { name: "New request", exact: true }).click();
   await page.getByLabel("Try a sample").selectOption(sample);
   if (broker) await page.getByLabel("Simulated broker").selectOption(broker);
-  await page.getByRole("button", { name: "Create & process request" }).click();
+  await page.getByRole("button", { name: "Submit request" }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
   await expect(
     detail(page)
@@ -100,13 +100,17 @@ test("slow intake prevents duplicate submission and retains a single saved reque
     await route.continue();
   });
   try {
-    await page
-      .getByRole("button", { name: "Create & process request" })
-      .click();
+    await page.getByRole("button", { name: "Submit request" }).click();
     await expect(
       page.getByRole("button", { name: "Saving request…" }),
     ).toBeDisabled();
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    const closeButton = page.getByRole("button", { name: "Close dialog" });
+    await expect(closeButton).toBeDisabled();
+    await closeButton.focus();
+    await expect(closeButton).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(page.getByRole("dialog")).toBeVisible();
     await capture(page, "saving-request");
   } finally {
@@ -165,12 +169,12 @@ for (const [sample, label] of [
     await page
       .getByLabel("Upload corrected PDF")
       .setInputFiles(resolve("../src/policy_update/assets/proof-matching.pdf"));
-    await page.getByRole("button", { name: "Save reply & revalidate" }).click();
+    await page.getByRole("button", { name: "Save & check again" }).click();
     await expect(
       page.getByRole("button", { name: "Approve v2" }),
     ).toBeVisible();
     await expect(
-      detail(page).getByText("Text fields inspected · Page 2"),
+      detail(page).getByText("Document text checked · Page 2"),
     ).toBeVisible();
     await capture(page, "corrected-wide");
     await page.getByRole("tab", { name: "Request & evidence" }).click();
@@ -332,9 +336,9 @@ test("a persisted extraction failure exposes the safe error and retries to revie
   await openWorkspace(page);
   await page.getByRole("button", { name: "New request", exact: true }).click();
   await page
-    .getByLabel("Original request", { exact: true })
+    .getByLabel("Paste email", { exact: true })
     .fill("RETRY-SCENARIO: DEMO-1001 email to retry@example.com");
-  await page.getByRole("button", { name: "Create & process request" }).click();
+  await page.getByRole("button", { name: "Submit request" }).click();
   await expect(detail(page).getByRole("alert")).toContainText(
     "429 RESOURCE_EXHAUSTED",
   );

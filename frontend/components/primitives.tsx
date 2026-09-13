@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type ReactNode } from "react";
-import { X, AlertCircle, CheckCircle2 } from "lucide-react";
+import { X, AlertCircle, CheckCircle2, Info } from "lucide-react";
 import { type CaseStatus, statuses } from "@/lib/types";
 
 export function Badge({ status }: { status: CaseStatus }) {
@@ -69,8 +69,10 @@ export function Dialog({
         <button
           className="icon-button"
           aria-label="Close dialog"
-          onClick={close}
-          disabled={busy}
+          onClick={() => {
+            if (!busy) close();
+          }}
+          aria-disabled={busy}
         >
           <X size={20} />
         </button>
@@ -88,4 +90,16 @@ export function date(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+export function SupportNote({ id }: { id?: string }) {
+  return (
+    <p className="support-note" id={id}>
+      <Info size={15} aria-hidden="true" />
+      <span>
+        Currently supports English text and PDFs with selectable text. Images
+        and scanned documents aren’t supported yet.
+      </span>
+    </p>
+  );
 }

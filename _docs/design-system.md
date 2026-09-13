@@ -3,7 +3,7 @@
 Last inspected: 2026-09-13. Read before changing the UI. Scope comes from
 [plan.md](plan.md); delivery tasks live in [process.md](process.md).
 
-## Current baseline: Minimal review workspace (D003)
+## Current baseline: Sunday orange review workspace (D008)
 
 The Next.js/React dashboard is implemented in [frontend](../frontend/). The README
 starts the product on port **3002** (Next.js defaults to 3000); port 8000 `/docs` is the
@@ -25,12 +25,16 @@ It creates no example cases until the guest submits a request.
 
 ### Visual decisions
 
-- Palette: page `#f7f8f5`, white surfaces, ink `#243730`, secondary text `#5d6c64`,
-  borders `#e2e7e1`, primary green `#24674f`, hover `#194f3c`, focus `#39715d`. Use the
-  CSS semantic variables for success, information, warning, and error.
+- Palette: warm page `#faf9f7`, white surfaces, ink `#292522`, secondary text
+  `#69615c`, and borders `#e8e3df`. Sunday orange `#FA4616` marks primary actions,
+  selection, and the header accent. Orange buttons use a deeper action shade
+  `#d9360b` with white text/icons and `#be2e08` hover. This retains readable
+  contrast for compact 14px labels. The original `#FA4616` remains the brand accent. Small links and focus rings use darker orange `#b53210`,
+  with `#fff0ea` selected surfaces. Semantic success/information/warning/error
+  colors retain their separate meanings.
 - Typography: local Arial/Helvetica throughout. Main heading 24–26 px, case and
-  dialog headings 20–22 px, primary content 12–14 px. Use plain descriptive headings
-  and readable values. No display serif, slogans, or remote font requests.
+  dialog headings 20–22 px, primary content 15–16 px, and supporting labels 14 px
+  (compact header labels 12–13 px). Use plain descriptive headings and readable values. No display serif, slogans, or remote font requests.
 - Spacing: 4/8/12/16/20/24/32/40 px scale. Desktop canvas padding 24 px; mobile
   padding 16 px. Radius 6 px for controls, 10 px for panels, 12 px for dialogs.
 - Layout: one compact top header with Policy desk, Sample library, and Help.
@@ -55,7 +59,11 @@ It creates no example cases until the guest submits a request.
   responses from earlier selections/actions are discarded.
 - Intake accepts English request text, an explicit policy number when available,
   simulated broker context, optional structured contact changes, sample evidence,
-  and a text PDF up to 5 MB. Sample forms populate from the API fixtures.
+  and a text PDF up to 5 MB. Labels say Paste email and Upload document. A shared,
+  quiet notice in intake, correction, sample library, and Help explains English
+  text/selectable-text PDF support and the lack of image/scanned-document support.
+  Sample document options are collapsed until needed. Sample forms populate from
+  the API fixtures.
 - A saved intake survives upload/queue failure; retrying the dialog continues that
   case instead of creating another. No image/OCR claim is made.
 - Review exposes the original request/replies, evidence source and page, findings,
@@ -185,3 +193,85 @@ visually reviewed. Manual screen-reader checks and actual Safari remain open.
 
 Guest-expiry behavior: an API 401 clears the guest cookie and selected case so “Open
 demo workspace” can start a fresh session. This does not add a new screen.
+
+### D005 — 2026-09-13 — Sunday orange and clearer dashboard copy
+
+Refined the existing workspace at the user’s request for a minimal, comfortable UI.
+Replaced the green brand palette with Sunday orange and warm neutral surfaces.
+Dark text on the exact orange keeps primary actions readable; darker orange handles
+small links and focus. Increased supporting text, comparison values, and main action
+sizes. Mobile search and status filters use separate rows, and form fields use 16px
+text on narrow screens. Retained the compact navigation and queue/review layout.
+
+Revised entry, intake, help, document, progress, review, and completion copy. Paste
+email describes the existing text input; Upload document describes the existing PDF
+attachment control. There is no email-file import. A shared SupportNote explains
+English and selectable-text PDF support without putting restrictions in field labels.
+Sample document options use native disclosure. Technical evidence terms became
+Sample document and Document text checked. Approval remains bound to the displayed
+version, separate from applying the update; saved drafts remain visibly unsent.
+
+Sources: globals.css, dashboard.tsx, forms.tsx, and primitives.tsx linked above.
+Updated existing browser selectors to match visible labels; behavior coverage is
+unchanged. Refreshed reference screenshots cover the same states and viewports.
+
+Verification: frontend formatting, TypeScript, production build, and all 33 browser
+checks passed across Chromium, Firefox, and WebKit, including axe WCAG A/AA checks,
+keyboard/dialog behavior, approval/version safety, correction, and retry. All 14
+reference screenshots regenerated; 1440px review, 390px review, and saving intake
+were visually inspected. Tests use isolated synthetic data and scripted extraction;
+no hosted model was called. Actual Safari/VoiceOver and hosted checks remain open.
+
+### D006 — 2026-09-13 — Larger body text and white New request label
+
+Increased body and comparison text to 16px, supporting copy to 14px, and most
+controls to 15–16px. Body line-height is 1.65. New request uses white text and icon
+on Sunday orange; its 19px bold label meets the large-text contrast threshold.
+The hover uses a slightly darker orange. Compact header labels remain smaller to
+keep navigation usable on mobile. Other primary buttons retain their existing text
+color. Sources: globals.css and the dashboard New request button linked above.
+
+The larger form exposed an existing keyboard-scroll problem while saving: every
+control became unfocusable. The dialog close control now remains keyboard-focusable
+and uses aria-disabled with an activation guard while busy. It cannot dismiss an
+in-flight request, and the scrollable dialog remains accessible from the keyboard.
+
+D006 verification: formatting, TypeScript, and production build passed. The full
+browser run passed 30 checks and exposed the saving-dialog focus issue in all three
+engines. After the fix, all six affected saving/keyboard/mobile checks passed across
+Chromium, Firefox, and WebKit, including axe contrast and keyboard focus checks.
+Refreshed reference images; desktop/mobile review and saving intake were visually
+inspected. Synthetic data and scripted extraction only; no hosted model calls.
+
+### D007 — 2026-09-13 — White labels on every orange button
+
+Applied the user's white-text preference to the shared primary-button style, including
+entry, intake, review, apply, and help actions. Icons inherit the same white color.
+All orange buttons now share the existing New request 19px bold label and darker
+orange hover to preserve large-text contrast on Sunday orange. Removed the per-button
+exception. Secondary buttons and semantic status colors retain their existing roles.
+
+D007 verification: formatting, TypeScript, production build, and all 11 Chromium
+workflow checks passed, including axe contrast, keyboard/dialog behavior, and mobile
+layout. Refreshed reference screenshots; desktop approved and mobile review states
+were visually inspected. Synthetic data only; no hosted model calls. Firefox/WebKit
+were not rerun for this shared color/style change.
+
+### D008 — 2026-09-13 — Compact buttons and smaller labels
+
+Reduced shared action buttons from the oversized 19px primary labels to 14px/600,
+with 38px minimum height, 8px × 12px padding, and 16px icons. Small actions use 13px
+labels and 32px height; icon controls use 36px squares. Text actions, tabs, and the
+native file-picker button also use compact labels. Body and comparison text keep
+the larger D006 reading sizes. Mobile actions retain their available full width.
+
+White text remains on all orange actions. Buttons use a deeper brand-derived orange
+`#d9360b` (4.68:1 with white) so compact labels remain readable; the header/selection
+accent retains exact Sunday `#FA4616`. Hover is `#be2e08`. These shared rules in
+globals.css supersede D007's 19px primary-button sizing.
+
+D008 verification: formatting, TypeScript, production build, and all 11 Chromium
+workflow checks passed, including axe contrast, keyboard/dialog behavior, and mobile
+layout. Reference screenshots were refreshed; desktop and 390px mobile review states
+were visually inspected. Existing coverage is unchanged. Synthetic data only; no
+hosted model calls. Firefox/WebKit were not rerun for this CSS-only refinement.

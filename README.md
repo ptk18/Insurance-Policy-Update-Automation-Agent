@@ -8,9 +8,11 @@ contact updates. Read the [plan](_docs/plan.md), [delivery checklist](_docs/proc
 ## What works
 
 The minimal Next.js dashboard supports isolated guest workspaces, sample requests,
-pasted English requests, PDF uploads, a request queue, evidence findings, before/after
+pasted requests, PDF uploads, a request queue, evidence findings, before/after
 comparison, proposal edits, approval/rejection, corrected evidence, retry, unsent
-drafts, and activity history.
+drafts, and activity history. The Sunday orange theme uses clearer labels, readable
+controls, and a subtle notice: processing currently supports English text and PDFs
+with selectable text; images and scans are not supported.
 
 With a Gemini key configured, the backend extracts structured changes from free text and
 runs a bounded LangGraph loop. The model selects from eight typed tools, observes their
